@@ -45,15 +45,16 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 │              analyzer.c/.h          │ ← Analysis coordinator
 ├─────────────────────────────────────┤
 │           ethernet.c/.h             │ ← Data Link Layer
+│           arp.c/.h                  │
 ├─────────────────────────────────────┤
 │              ip.c/.h                │ ← Network Layer (IPv4/IPv6)
 ├─────────────────────────────────────┤
 │         tcp.c/.h  │  udp.c/.h       │ ← Transport Layer
-│         icmp.c/.h  │  dns.c/.h      │
-│         arp.c/.h                    │
+│         icmp.c/.h                   │
+├─────────────────────────────────────┤
+│              dns.c/.h               │ ← Application Layer
 └─────────────────────────────────────┘
 ```
-
 ## Building
 
 ### Prerequisites
