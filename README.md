@@ -41,7 +41,7 @@ Requires WinPcap/libpcap dev headers, Winsock2, and libpq (PostgreSQL client lib
 gcc src/*.c -o sniffer -lpcap -lpq -lpthread
 ```
 
-**Note:** Make sure all `.c` files in `src/` are included, especially the new `logger.c`.
+**Note:** Make sure all `.c` files in `src/` are included.
 
 ## Configure
 - Copy `env.example` to `.env` and set `AWS_RDS_CONNINFO`.
@@ -72,8 +72,6 @@ The batch thread flushes to PostgreSQL and `stats.json` every ~15 seconds. On fa
 - ✅ **Safe signal handling** - POSIX-compliant Ctrl+C handler
 - ✅ **Event-based thread shutdown** - Clean termination without race conditions
 - ✅ **Error tracking** - Visibility into allocation failures and drops
-
-See `FIXES_IMPLEMENTED.md` for detailed improvements and `CODE_ANALYSIS.md` for the original analysis.
 
 ### Threading Model
 - **Capture Thread**: Continuously captures packets using pcap_dispatch()
