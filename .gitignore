@@ -1,0 +1,95 @@
+certs/
+# Compiled Object files
+*.o
+*.obj
+*.ko
+*.elf
+
+# Executable files
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Build directories
+build/
+bin/
+obj/
+Debug/
+Release/
+x64/
+x86/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.cache
+
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows specific
+*.lnk
+desktop.ini
+
+# Linux specific
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# Project specific
+# Keep source files but ignore compiled outputs
+*.pcap
+*.cap
+capture_*.log
+analysis_*.log
+
+# Dependencies (if using package managers)
+deps/
+vendor/
+node_modules/
+
+# Configuration files with sensitive data
+config.ini
+secrets.txt
+*.key
+*.pem
+*.crt
+.env
+.env.*
+
+# Backup files
+*.bak
+*.backup
+*.orig
+
+# Profiling and debugging
+*.prof
+*.gprof
+core
+core.*
+gmon.out

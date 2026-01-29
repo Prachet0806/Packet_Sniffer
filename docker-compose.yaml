@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: ps_postgres
+    environment:
+      POSTGRES_USER: sniffer
+      POSTGRES_PASSWORD: snifferpass
+      POSTGRES_DB: snifferdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ps_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin 
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:
