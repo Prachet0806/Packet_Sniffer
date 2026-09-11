@@ -1,0 +1,13 @@
+{
+  "total_packets": 0,
+  "ethernet": 0,
+  "ipv4": 0,
+  "ipv6": 0,
+  "tcp": 0,
+  "udp": 0,
+  "icmp": 0,
+  "arp": 0,
+  "dns": 0,
+  "http": 0,
+  "https": 0
+}
