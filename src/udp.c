@@ -1,5 +1,6 @@
 #include "udp.h"
 #include "dns.h"
+#include "dhcp.h"
 #include "stats.h"
 #include <stdio.h>
 #include <string.h>
@@ -37,6 +38,15 @@ void parse_udp(const u_char *data, int size, const char *src_ip, const char *dst
         int payload_size = ulen - (int)sizeof(udp_header_t);
         if (payload_size > 0) {
             parse_dns(payload, payload_size);
+        }
+    }
+    // DHCP on ports 67/68
+    else if (src_port == DHCP_SERVER_PORT || dst_port == DHCP_SERVER_PORT ||
+             src_port == DHCP_CLIENT_PORT || dst_port == DHCP_CLIENT_PORT) {
+        const u_char *payload = data + sizeof(udp_header_t);
+        int payload_size = ulen - (int)sizeof(udp_header_t);
+        if (payload_size > 0) {
+            parse_dhcp(payload, payload_size, src_ip, dst_ip, src_port, dst_port);
         }
     }
 }

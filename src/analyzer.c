@@ -1,15 +1,23 @@
-// Packet analysis implementation (DLT-aware)
+// Packet analysis implementation (DLT-aware, log-level gated)
 #include "analyzer.h"
 #include "ethernet.h"
 #include "ip.h"
 #include "sniffer.h"
+#include "logger.h"
 #include <stdio.h>
 #include <string.h>
 
+static unsigned long long packet_count = 0;
+
 void analyze_packet(const struct pcap_pkthdr *header, const u_char *pkt_data) {
+    packet_count++;
     int caplen = (int)header->caplen;
-    printf("\n[+] Packet captured: caplen %d bytes (wire %d bytes, DLT=%d)\n",
-           caplen, header->len, sniffer_datalink());
+    if (current_log_level >= LOG_DEBUG) {
+        printf("\n[+] Packet #%llu: caplen %d bytes (wire %d bytes, DLT=%d)\n",
+               packet_count, caplen, header->len, sniffer_datalink());
+    } else if (packet_count % 1000 == 0) {
+        printf("[*] Processed %llu packets...\n", packet_count);
+    }
     if (caplen <= 0) return;
 
     int dlt = sniffer_datalink();

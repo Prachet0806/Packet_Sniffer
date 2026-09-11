@@ -45,8 +45,11 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
   - Response status line parsing
 - **HTTPS/TLS**: TLS protocol analysis
   - TLS record type identification
-  - TLS version detection (SSL 3.0, TLS 1.0-1.3)
+  - TLS version detection (SSL 3.0–TLS 1.2; 1.3 uses legacy `0x0303` on the wire)
   - Handshake and application data tracking
+- **DHCP**: DISCOVER/OFFER/REQUEST/ACK parsing (UDP ports 67/68)
+  - Magic-cookie validation, message-type/lease/hostname options
+  - See `db_migration_add_dhcp.sql`, `AWS_RDS_QUICK_START.md`
 
 ## Architecture
 
@@ -65,7 +68,7 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 │         icmp.c/.h                   │
 ├─────────────────────────────────────┤
 │         dns.c/.h  │  http.c/.h      │ ← Application Layer
-│         https.c/.h                   │
+│   https.c/.h │ dhcp.c/.h │ logger.c/.h │
 ├─────────────────────────────────────┤
 │         stats.c/.h  │  db.c/.h      │ ← Data Management
 └─────────────────────────────────────┘
@@ -215,10 +218,14 @@ Packet_Sniffer/
 │   ├── icmp.c/.h          # ICMP message parsing
 │   ├── arp.c/.h           # ARP packet parsing
 │   ├── dns.c/.h           # DNS query/response parsing
+│   ├── dhcp.c/.h          # DHCP message parsing (ports 67/68)
+│   ├── logger.c/.h        # Log-level gated logging
 │   ├── http.c/.h          # HTTP protocol parsing
 │   ├── https.c/.h         # HTTPS/TLS protocol parsing
 │   ├── stats.c/.h         # Statistics collection and management
 │   └── db.c/.h            # PostgreSQL database integration
+├── db_migration_add_dhcp.sql  # DHCP columns migration
+├── AWS_RDS_QUICK_START.md / AWS_QUICK_REFERENCE.md  # RDS docs
 ├── build/
 │   ├── sniffer.exe        # Compiled executable
 │   └── stats.json         # Statistics export file
@@ -334,11 +341,11 @@ CREATE TABLE IF NOT EXISTS protocol_stats (
 ## Future Enhancements
 
 - [x] HTTP/HTTPS protocol support
+- [x] DHCP protocol parsing (DISCOVER/OFFER/REQUEST/ACK, ports 67/68)
 - [x] Statistics collection system
-- [x] Database integration
+- [x] Database integration (incl. `db_migration_add_dhcp.sql`, AWS RDS docs)
 - [x] Docker containerization
-- [ ] DHCP protocol parsing
-- [ ] VLAN (802.1Q) support
+- [x] VLAN (802.1Q) support
 - [ ] Packet filtering capabilities
 - [ ] PCAP file export
 - [ ] GUI interface

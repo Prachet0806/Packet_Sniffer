@@ -18,6 +18,8 @@ set(SNIFFER_SOURCES
     src/udp.c
     src/http.c
     src/https.c
+    src/dhcp.c
+    src/logger.c
     src/stats.c
     src/db.c
 )

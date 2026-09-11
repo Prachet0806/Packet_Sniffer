@@ -83,6 +83,7 @@ node_modules/
 config.ini
 secrets.txt
 .env
+certs/
 *.key
 *.pem
 *.crt
