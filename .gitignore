@@ -28,7 +28,10 @@ x64/
 x86/
 
 # IDE and Editor files
-.vscode/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/c_cpp_properties.json
 .idea/
 *.swp
 *.swo
@@ -41,16 +44,6 @@ Thumbs.db
 *.temp
 *.log
 *.cache
-
-# Archive files
-*.7z
-*.dmg
-*.gz
-*.iso
-*.jar
-*.rar
-*.tar
-*.zip
 
 # OS generated files
 .DS_Store
@@ -78,6 +71,8 @@ desktop.ini
 *.cap
 capture_*.log
 analysis_*.log
+stats.json.tmp
+pgdata/*
 
 # Dependencies (if using package managers)
 deps/
@@ -87,6 +82,7 @@ node_modules/
 # Configuration files with sensitive data
 config.ini
 secrets.txt
+.env
 *.key
 *.pem
 *.crt

@@ -8,6 +8,10 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 - **Multi-threaded Architecture**: Separate capture and analysis threads for optimal performance
 - **Thread-safe Queue**: Efficient packet buffering between capture and analysis
 - **Real-time Analysis**: Live packet dissection and display
+- **Statistics Collection**: Protocol-wise packet and byte counting with thread-safe aggregation
+- **Database Integration**: PostgreSQL storage for persistent statistics
+- **JSON Export/Import**: Statistics persistence in JSON format
+- **Docker Support**: Containerized deployment with Docker and Docker Compose
 - **Cross-platform Ready**: Uses libpcap (Windows/Linux/macOS compatible)
 
 ### Supported Protocols
@@ -35,6 +39,14 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
   - A, AAAA, CNAME, MX, NS, PTR, TXT records
   - Name compression support
   - Query/Response flag analysis
+- **HTTP**: HTTP request/response parsing
+  - Request method and URI extraction
+  - Host header detection
+  - Response status line parsing
+- **HTTPS/TLS**: TLS protocol analysis
+  - TLS record type identification
+  - TLS version detection (SSL 3.0, TLS 1.0-1.3)
+  - Handshake and application data tracking
 
 ## Architecture
 
@@ -45,46 +57,77 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 │              analyzer.c/.h          │ ← Analysis coordinator
 ├─────────────────────────────────────┤
 │           ethernet.c/.h             │ ← Data Link Layer
+│           arp.c/.h                  │
 ├─────────────────────────────────────┤
 │              ip.c/.h                │ ← Network Layer (IPv4/IPv6)
 ├─────────────────────────────────────┤
 │         tcp.c/.h  │  udp.c/.h       │ ← Transport Layer
-│         icmp.c/.h  │  dns.c/.h      │
-│         arp.c/.h                    │
+│         icmp.c/.h                   │
+├─────────────────────────────────────┤
+│         dns.c/.h  │  http.c/.h      │ ← Application Layer
+│         https.c/.h                   │
+├─────────────────────────────────────┤
+│         stats.c/.h  │  db.c/.h      │ ← Data Management
 └─────────────────────────────────────┘
 ```
 
 ## Building
 
 ### Prerequisites
-- GCC compiler
-- WinPcap/libpcap development libraries
-- Windows Sockets (Winsock2)
+- CMake 3.16+, C11 compiler (MSVC / GCC / Clang)
+- Npcap SDK (Windows, set `NPCAP_SDK`) or libpcap-dev (Linux)
+- PostgreSQL client (optional; set `POSTGRES_ROOT` on Windows). Build works without it (JSON-only mode).
+- Docker and Docker Compose - optional, for containerized deployment
 
-### Compilation
+### Compilation (all platforms, recommended)
 ```bash
-gcc src/*.c -o build/sniffer.exe -lws2_32 -liphlpapi -lpcap
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+# binary: build/sniffer  (Windows: build/Release/sniffer.exe)
 ```
 
-### Linux/macOS
+Windows notes: open a VS Developer Prompt so `cl` is on PATH, or use
+`"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"`.
+MSVC + `libpq.lib` is required for PostgreSQL support with `cl`; MinGW builds
+default to JSON-only unless a MinGW-compatible libpq is provided.
+
+### Docker Deployment
 ```bash
-gcc src/*.c -o sniffer -lpcap
+# Copy secrets template first
+copy .env.example .env   # Windows / cp .env.example .env on Linux
+# Build and run PostgreSQL + Grafana + sniffer
+docker compose up --build -d
+
+# Sniffer needs capture privileges; compose uses network_mode: host +
+# cap_add NET_RAW/NET_ADMIN. Override at runtime:
+#   SNIFFER_IFACE=1 SNIFFER_FILTER="tcp port 80" STATS_FLUSH_MS=60000
 ```
 
 ## Usage
 
 1. **Run the application**:
    ```bash
-   ./build/sniffer.exe
+   ./build/sniffer --help
+   ./build/sniffer --iface 1 --filter "tcp port 80" --verbose
+   # Env alternatives: SNIFFER_IFACE, SNIFFER_FILTER, SNIFFER_VERBOSE=1,
+   #   DATABASE_URL="host=localhost port=5432 dbname=snifferdb user=sniffer password=...",
+   #   STATS_FLUSH_MS=60000, --no-db for JSON-only
    ```
 
 2. **Select network interface**:
-   - The program lists all available network interfaces
-   - Choose the interface number to monitor
+   - Without `--iface`/`SNIFFER_IFACE` the program lists interfaces and prompts.
+   - In Docker / non-interactive shells you must pass `--iface` (index or name
+     substring) or set `SNIFFER_IFACE`, otherwise it exits instead of hanging.
 
 3. **Monitor traffic**:
    - Packets are captured and analyzed in real-time
    - Detailed protocol information is displayed
+   - Statistics are collected and can be exported to JSON or PostgreSQL
+
+4. **View statistics**:
+   - Statistics are automatically saved to `stats.json`
+   - Configure PostgreSQL connection for database storage
+   - Use Grafana (via Docker Compose) for visualization
 
 ## Sample Output
 
@@ -115,6 +158,21 @@ DNS: Query (ID=0x1234)
      Flags: RD 
      Questions: 1, Answers: 0, Authorities: 0, Additional: 0
      Question: google.com (Type=1, Class=1)
+
+[+] Packet captured: length 542 bytes
+
+[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
+IPv4: 192.168.1.100 -> 93.184.216.34, TTL=64, Proto=6, Len=528
+TCP: 192.168.1.100:54321 -> 93.184.216.34:80, Seq=1234567890 Ack=987654321, Win=65535 [ACK PSH]
+[HTTP] 192.168.1.100:54321 -> 93.184.216.34:80 | GET /index.html HTTP/1.1
+[HTTP]   Host: example.com
+
+[+] Packet captured: length 128 bytes
+
+[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
+IPv4: 192.168.1.100 -> 172.217.164.110, TTL=64, Proto=6, Len=114
+TCP: 192.168.1.100:54322 -> 172.217.164.110:443, Seq=2345678901 Ack=0, Win=65535 [SYN]
+HTTPS: 192.168.1.100:54322 -> 172.217.164.110:443, TLS Record: Handshake, Version=TLS 1.3, Length=89
 ```
 
 ## Technical Details
@@ -133,6 +191,14 @@ DNS: Query (ID=0x1234)
 - Zero-copy packet queuing
 - Lock-free data structures where possible
 - Optimized protocol parsing algorithms
+- Batch statistics updates for reduced database overhead
+
+### Statistics & Data Management
+- **Thread-safe Statistics**: Protocol-wise packet and byte counting
+- **JSON Persistence**: Statistics export/import in JSON format
+- **PostgreSQL Integration**: Persistent storage in PostgreSQL database
+- **Batch Processing**: Periodic batch updates to reduce database load
+- **Grafana Integration**: Ready for visualization with Grafana (via Docker Compose)
 
 ## File Structure
 
@@ -148,10 +214,19 @@ Packet_Sniffer/
 │   ├── udp.c/.h           # UDP datagram parsing
 │   ├── icmp.c/.h          # ICMP message parsing
 │   ├── arp.c/.h           # ARP packet parsing
-│   └── dns.c/.h           # DNS query/response parsing
+│   ├── dns.c/.h           # DNS query/response parsing
+│   ├── http.c/.h          # HTTP protocol parsing
+│   ├── https.c/.h         # HTTPS/TLS protocol parsing
+│   ├── stats.c/.h         # Statistics collection and management
+│   └── db.c/.h            # PostgreSQL database integration
 ├── build/
-│   └── sniffer.exe        # Compiled executable
-└── README.md              # This file
+│   ├── sniffer.exe        # Compiled executable
+│   └── stats.json         # Statistics export file
+├── pgdata/                # PostgreSQL data volume (Docker)
+├── Dockerfile             # Docker container definition
+├── docker-compose.yaml    # Docker Compose configuration
+├── .gitignore            # Git ignore rules
+└── README.md             # This file
 ```
 
 ## Protocol Support Details
@@ -169,9 +244,31 @@ Packet_Sniffer/
 - **Response Codes**: Complete error code interpretation
 
 ### ARP Support
-- **Operation Types**: Request, Reply, RARP Request/Reply
+- **Operation Types**: Request, Reply (RARP shares the ARP format on EtherType `0x8035`)
 - **Address Resolution**: IP-to-MAC mapping display
 - **Broadcast Detection**: Identifies broadcast ARP requests
+
+### HTTP Features
+- **Request Parsing**: HTTP method, URI, and version extraction
+- **Header Analysis**: Host header detection and display
+- **Response Parsing**: HTTP status line analysis
+- **Case-insensitive Matching**: Robust header field detection
+
+### HTTPS/TLS Features
+- **TLS Record Parsing**: Content type identification (Handshake, ApplicationData, Alert, etc.)
+- **Version Detection**: SSL 3.0–TLS 1.2; TLS 1.3 uses legacy `0x0303` on the wire
+  (true version is in the `supported_versions` extension), so it is reported as
+  `TLS 1.2-or-1.3-wire`.
+- **Record Length Analysis**: TLS record size tracking, truncated-record detection
+- **Future Extension**: SNI parsing
+
+### Statistics System
+- **Protocol Counters**: Per-protocol packet and byte counts
+- **Thread-safe Updates**: Concurrent statistics updates with critical sections
+- **Batch Processing**: Periodic database updates for performance
+- **JSON Export**: Human-readable statistics in JSON format
+- **Database Integration**: PostgreSQL storage for historical analysis
+- **Auto-save**: Automatic statistics persistence on shutdown
 
 ## Development
 
@@ -187,6 +284,68 @@ Packet_Sniffer/
 - Proper error handling and validation
 - Thread-safe implementations
 
+
+## Configuration
+
+### Statistics Configuration
+Statistics are automatically collected and can be configured via the `stats_init()` function:
+- **JSON file**: `stats.json` (auto-generated in build directory)
+- **PostgreSQL**: Configure connection string in `stats_init()`
+  - Format: `"host=localhost port=5432 dbname=snifferdb user=sniffer password=snifferpass"`
+- **Batch interval**: Configurable batch update frequency (default: periodic updates)
+
+### Docker Configuration
+The `docker-compose.yaml` includes:
+- **PostgreSQL**: Database for statistics storage (port 5432)
+  - User: `sniffer`
+  - Password: `snifferpass`
+  - Database: `snifferdb`
+- **Grafana**: Visualization dashboard (port 3000)
+  - Default credentials: `admin/admin`
+  - Pre-configured to connect to PostgreSQL
+  - Access at: `http://localhost:3000`
+
+### Database Setup
+1. **Using Docker Compose** (Recommended):
+   ```bash
+   docker-compose up -d postgres
+   ```
+   This automatically creates the database and required tables.
+
+2. **Manual PostgreSQL Setup**:
+   ```sql
+   CREATE DATABASE snifferdb;
+   CREATE USER sniffer WITH PASSWORD 'snifferpass';
+   GRANT ALL PRIVILEGES ON DATABASE snifferdb TO sniffer;
+   ```
+
+### Database Schema
+PostgreSQL table structure (auto-created by the application):
+```sql
+CREATE TABLE IF NOT EXISTS protocol_stats (
+    id SERIAL PRIMARY KEY,
+    protocol VARCHAR(32) UNIQUE NOT NULL,
+    packet_count BIGINT DEFAULT 0,
+    byte_count BIGINT DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## Future Enhancements
+
+- [x] HTTP/HTTPS protocol support
+- [x] Statistics collection system
+- [x] Database integration
+- [x] Docker containerization
+- [ ] DHCP protocol parsing
+- [ ] VLAN (802.1Q) support
+- [ ] Packet filtering capabilities
+- [ ] PCAP file export
+- [ ] GUI interface
+- [ ] REST API for remote access
+- [ ] Real-time Grafana dashboards
+- [ ] Machine learning anomaly detection
+
 ## License
 
 This project is open source and available under the MIT License.
@@ -194,14 +353,3 @@ This project is open source and available under the MIT License.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
-
-## Future Enhancements
-
-- [ ] HTTP/HTTPS protocol support
-- [ ] DHCP protocol parsing
-- [ ] VLAN (802.1Q) support
-- [ ] Packet filtering capabilities
-- [ ] PCAP file export
-- [ ] Real-time statistics
-- [ ] GUI interface
-- [ ] REST API for remote access

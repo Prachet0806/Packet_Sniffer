@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "Win32",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "C:/npcap-sdk/Include",
+        "C:/Program Files/PostgreSQL/17/include",
+        "C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt",
+        "C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared",
+        "C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/um"
+      ],
+      "defines": [
+        "_CRT_SECURE_NO_WARNINGS",
+        "UNICODE",
+        "_UNICODE"
+      ],
+      "compilerPath": "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35214/bin/Hostx64/x64/cl.exe",
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-msvc-x64"
+    }
+  ],
+  "version": 4
+}

@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Configure (CMake)",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Packet Sniffer",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["--build", "build", "--config", "Release"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "build", "isDefault": true },
+      "dependsOn": ["Configure (CMake)"],
+      "problemMatcher": ["$msCompile", "$gcc"]
+    }
+  ]
+}

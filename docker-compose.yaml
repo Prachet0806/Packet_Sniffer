@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: ps_postgres
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sniffer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-snifferpass}
+      POSTGRES_DB: ${POSTGRES_DB:-snifferdb}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-sniffer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ps_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+
+  sniffer:
+    build: .
+    container_name: ps_sniffer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "host=postgres port=5432 dbname=${POSTGRES_DB:-snifferdb} user=${POSTGRES_USER:-sniffer} password=${POSTGRES_PASSWORD:-snifferpass}"
+      SNIFFER_IFACE: ${SNIFFER_IFACE:-}
+      SNIFFER_FILTER: ${SNIFFER_FILTER:-}
+      STATS_FLUSH_MS: ${STATS_FLUSH_MS:-60000}
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    network_mode: host
+    command: ["--help"]
+
+volumes:
+  pgdata:

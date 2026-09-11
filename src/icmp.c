@@ -1,7 +1,13 @@
 // ICMP packet parsing
 #include "icmp.h"
+#include "stats.h"
 #include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
 #include <winsock2.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 static void icmpv4_print(const icmpv4_header_t *h) {
     switch (h->type) {
@@ -19,12 +25,19 @@ static void icmpv4_print(const icmpv4_header_t *h) {
 }
 
 void parse_icmp(const u_char *data, int size) {
-    if (size < (int)sizeof(icmpv4_header_t)) {
+    if (size < 4) {
         printf("ICMPv4: Truncated\n");
         return;
     }
-    const icmpv4_header_t *h = (const icmpv4_header_t *)data;
-    icmpv4_print(h);
+    stats_increment("ICMP", (uint32_t)size);
+    if (size < (int)sizeof(icmpv4_header_t)) {
+        // Types without id/seq (e.g. dest-unreach) are only 4+ bytes
+        printf("ICMPv4: Type=%u Code=%u (short)\n", data[0], data[1]);
+        return;
+    }
+    icmpv4_header_t h;
+    memcpy(&h, data, sizeof(h));
+    icmpv4_print(&h);
 }
 
 void parse_icmpv6(const u_char *data, int size) {
@@ -32,37 +45,34 @@ void parse_icmpv6(const u_char *data, int size) {
         printf("ICMPv6: Truncated\n");
         return;
     }
-    const icmpv6_header_t *h = (const icmpv6_header_t *)data;
+    stats_increment("ICMP", (uint32_t)size);
+    icmpv6_header_t h;
+    memcpy(&h, data, sizeof(h));
 
-    switch (h->type) {
+    switch (h.type) {
         case 128: // Echo Request
+        case 129: { // Echo Reply
+            const char *label = (h.type == 128) ? "Echo Request" : "Echo Reply";
             if (size >= 8) {
-                const u_short *id = (const u_short *)(data + 4);
-                const u_short *seq = (const u_short *)(data + 6);
-                printf("ICMPv6: Echo Request (id=%u, seq=%u)\n", ntohs(*id), ntohs(*seq));
+                u_short id_raw, seq_raw;
+                memcpy(&id_raw, data + 4, 2);
+                memcpy(&seq_raw, data + 6, 2);
+                printf("ICMPv6: %s (id=%u, seq=%u)\n", label, ntohs(id_raw), ntohs(seq_raw));
             } else {
-                printf("ICMPv6: Echo Request\n");
+                printf("ICMPv6: %s\n", label);
             }
             break;
-        case 129: // Echo Reply
-            if (size >= 8) {
-                const u_short *id = (const u_short *)(data + 4);
-                const u_short *seq = (const u_short *)(data + 6);
-                printf("ICMPv6: Echo Reply (id=%u, seq=%u)\n", ntohs(*id), ntohs(*seq));
-            } else {
-                printf("ICMPv6: Echo Reply\n");
-            }
-            break;
+        }
         case 133: printf("ICMPv6: Router Solicitation\n"); break;
         case 134: printf("ICMPv6: Router Advertisement\n"); break;
         case 135: printf("ICMPv6: Neighbor Solicitation\n"); break;
         case 136: printf("ICMPv6: Neighbor Advertisement\n"); break;
-        case 1:   // Destination Unreachable (v6)
-            printf("ICMPv6: Destination Unreachable (code=%u)\n", h->code); break;
-        case 3:   // Time Exceeded (v6)
-            printf("ICMPv6: Time Exceeded (code=%u)\n", h->code); break;
+        case 1:
+            printf("ICMPv6: Destination Unreachable (code=%u)\n", h.code); break;
+        case 3:
+            printf("ICMPv6: Time Exceeded (code=%u)\n", h.code); break;
         default:
-            printf("ICMPv6: Type=%u Code=%u\n", h->type, h->code);
+            printf("ICMPv6: Type=%u Code=%u\n", h.type, h.code);
             break;
     }
 }

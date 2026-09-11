@@ -1,15 +1,37 @@
-// DNS packet parsing
+// DNS packet parsing (hardened: no unaligned access, bounded compression)
 #include "dns.h"
+#include "stats.h"
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 // DNS name compression pointer flag
 #define DNS_COMPRESSION_MASK 0xC0
+#define DNS_MAX_JUMPS 64
 
 // Forward declaration
 static int parse_dns_name(const u_char *data, int data_len, int *offset, char *name, int name_size);
+
+static u_short read_u16(const u_char *data, int data_len, int *offset, int *ok) {
+    if (*offset + 2 > data_len) { *ok = 0; return 0; }
+    u_short v;
+    memcpy(&v, data + *offset, 2);
+    *offset += 2;
+    return ntohs(v);
+}
+
+static u_int read_u32(const u_char *data, int data_len, int *offset, int *ok) {
+    if (*offset + 4 > data_len) { *ok = 0; return 0; }
+    u_int v;
+    memcpy(&v, data + *offset, 4);
+    *offset += 4;
+    return ntohl(v);
+}
 
 // Parse DNS record
 static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_question) {
@@ -20,9 +42,10 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
         return -1;
     }
 
-    // Read fields
-    u_short type = ntohs(*(u_short*)(data + *offset)); *offset += 2;
-    u_short class = ntohs(*(u_short*)(data + *offset)); *offset += 2;
+    int ok = 1;
+    u_short type = read_u16(data, data_len, offset, &ok);
+    u_short class = read_u16(data, data_len, offset, &ok);
+    if (!ok) return -1;
 
     if (is_question) {
         printf("     Question: %s (Type=%u, Class=%u)\n", name, type, class);
@@ -30,14 +53,14 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
     }
 
     // Answer records
-    u_int ttl = ntohl(*(u_int*)(data + *offset)); *offset += 4;
-    u_short rdlength = ntohs(*(u_short*)(data + *offset)); *offset += 2;
+    u_int ttl = read_u32(data, data_len, offset, &ok);
+    u_short rdlength = read_u16(data, data_len, offset, &ok);
+    if (!ok) return -1;
 
     if (*offset + rdlength > data_len) {
         return -1;
     }
 
-    // Parse record data
     printf("     Answer: %s (Type=%u, Class=%u, TTL=%u)\n", name, type, class, ttl);
 
     switch (type) {
@@ -46,8 +69,8 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
                 struct in_addr addr;
                 memcpy(&addr, data + *offset, 4);
                 char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
-                printf("         A: %s\n", ip_str);
+                if (inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str)))
+                    printf("         A: %s\n", ip_str);
             }
             break;
         }
@@ -56,54 +79,54 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
                 struct in6_addr addr;
                 memcpy(&addr, data + *offset, 16);
                 char ip_str[INET6_ADDRSTRLEN];
-                inet_ntop(AF_INET6, &addr, ip_str, sizeof(ip_str));
-                printf("         AAAA: %s\n", ip_str);
+                if (inet_ntop(AF_INET6, &addr, ip_str, sizeof(ip_str)))
+                    printf("         AAAA: %s\n", ip_str);
             }
             break;
         }
         case DNS_TYPE_CNAME: {
             char cname[256] = {0};
             int temp_offset = *offset;
-            parse_dns_name(data, data_len, &temp_offset, cname, sizeof(cname));
-            printf("         CNAME: %s\n", cname);
+            if (parse_dns_name(data, data_len, &temp_offset, cname, sizeof(cname)) >= 0)
+                printf("         CNAME: %s\n", cname);
             break;
         }
         case DNS_TYPE_MX: {
             if (rdlength >= 2) {
-                u_short preference = ntohs(*(u_short*)(data + *offset));
-                int temp_offset = *offset + 2;
+                int tmp = *offset;
+                int ok2 = 1;
+                u_short preference = read_u16(data, data_len, &tmp, &ok2);
                 char mx_name[256] = {0};
-                parse_dns_name(data, data_len, &temp_offset, mx_name, sizeof(mx_name));
-                printf("         MX: %s (preference %u)\n", mx_name, preference);
+                if (ok2 && parse_dns_name(data, data_len, &tmp, mx_name, sizeof(mx_name)) >= 0)
+                    printf("         MX: %s (preference %u)\n", mx_name, preference);
             }
             break;
         }
         case DNS_TYPE_NS: {
             char ns_name[256] = {0};
             int temp_offset = *offset;
-            parse_dns_name(data, data_len, &temp_offset, ns_name, sizeof(ns_name));
-            printf("         NS: %s\n", ns_name);
+            if (parse_dns_name(data, data_len, &temp_offset, ns_name, sizeof(ns_name)) >= 0)
+                printf("         NS: %s\n", ns_name);
             break;
         }
         case DNS_TYPE_PTR: {
             char ptr_name[256] = {0};
             int temp_offset = *offset;
-            parse_dns_name(data, data_len, &temp_offset, ptr_name, sizeof(ptr_name));
-            printf("         PTR: %s\n", ptr_name);
+            if (parse_dns_name(data, data_len, &temp_offset, ptr_name, sizeof(ptr_name)) >= 0)
+                printf("         PTR: %s\n", ptr_name);
             break;
         }
         case DNS_TYPE_TXT: {
             printf("         TXT: ");
             const u_char *txt_data = data + *offset;
             int txt_len = rdlength;
-            while (txt_len > 0 && txt_len <= rdlength) {
+            while (txt_len > 0) {
                 int str_len = *txt_data++;
                 txt_len--;
-                if (str_len > 0 && str_len <= txt_len) {
-                    printf("\"%.*s\" ", str_len, txt_data);
-                    txt_data += str_len;
-                    txt_len -= str_len;
-                }
+                if (str_len <= 0 || str_len > txt_len) break;
+                printf("\"%.*s\" ", str_len, txt_data);
+                txt_data += str_len;
+                txt_len -= str_len;
             }
             printf("\n");
             break;
@@ -118,12 +141,13 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
     return 0;
 }
 
-// Parse DNS name
+// Parse DNS name (bounds-checked, jump-limited, name-size-checked)
 static int parse_dns_name(const u_char *data, int data_len, int *offset, char *name, int name_size) {
-    int original_offset = *offset;
     int name_pos = 0;
     int jumped = 0;
     int jump_offset = 0;
+    int jumps = 0;
+    if (name_size > 0) name[0] = '\0';
 
     while (*offset < data_len && name_pos < name_size - 1) {
         u_char len = data[*offset];
@@ -135,20 +159,28 @@ static int parse_dns_name(const u_char *data, int data_len, int *offset, char *n
 
         if ((len & DNS_COMPRESSION_MASK) == DNS_COMPRESSION_MASK) {  // Compression pointer
             if (*offset + 1 >= data_len) return -1;
+            if (++jumps > DNS_MAX_JUMPS) return -1;
 
             if (!jumped) {
                 jump_offset = *offset + 2;
                 jumped = 1;
             }
 
-            u_short pointer = ntohs(*(u_short*)(data + *offset)) & 0x3FFF;
+            u_short raw;
+            memcpy(&raw, data + *offset, 2);
+            u_short pointer = ntohs(raw) & 0x3FFF;
             if (pointer >= data_len) return -1;
 
             *offset = pointer;
             continue;
         }
 
-        if (*offset + len + 1 >= data_len) return -1;
+        // Plain label: top bits must be 00
+        if (len & DNS_COMPRESSION_MASK) return -1;
+        if (len > 63) return -1;
+        if (*offset + 1 + len > data_len) return -1;
+        // name buffer: need len + (1 dot?) + 1 NUL
+        if (name_pos + (name_pos > 0 ? 1 : 0) + len >= name_size) return -1;
 
         (*offset)++;
 
@@ -176,20 +208,19 @@ void parse_dns(const u_char *data, int size) {
         return;
     }
 
-    const dns_header_t *dns = (const dns_header_t *)data;
+    stats_increment("DNS", (uint32_t)size);
+
+    dns_header_t dns;
+    memcpy(&dns, data, sizeof(dns));
     int offset = sizeof(dns_header_t);
 
-    // Parse flags
-    u_short flags = ntohs(dns->flags);
+    u_short flags = ntohs(dns.flags);
     int is_response = (flags & DNS_FLAG_QR) != 0;
-    int opcode = (flags >> 11) & 0xF;
-    int rcode = flags & 0xF;
 
     printf("DNS: %s (ID=0x%04X)\n",
            is_response ? "Response" : "Query",
-           ntohs(dns->transaction_id));
+           ntohs(dns.transaction_id));
 
-    // Flags
     printf("     Flags: ");
     if (flags & DNS_FLAG_AA) printf("AA ");
     if (flags & DNS_FLAG_TC) printf("TC ");
@@ -197,18 +228,19 @@ void parse_dns(const u_char *data, int size) {
     if (flags & DNS_FLAG_RA) printf("RA ");
     if (flags & DNS_FLAG_AD) printf("AD ");
     if (flags & DNS_FLAG_CD) printf("CD ");
-    printf("\n");
+    printf("(rcode=%u)\n", flags & 0xF);
 
-    // Record counts
-    u_short questions = ntohs(dns->questions);
-    u_short answers = ntohs(dns->answer_rrs);
-    u_short authorities = ntohs(dns->authority_rrs);
-    u_short additionals = ntohs(dns->additional_rrs);
+    u_short questions = ntohs(dns.questions);
+    u_short answers = ntohs(dns.answer_rrs);
+    u_short authorities = ntohs(dns.authority_rrs);
+    u_short additionals = ntohs(dns.additional_rrs);
+    if (questions > 64) questions = 64;
+    if (answers > 128) answers = 128;
 
     printf("     Questions: %u, Answers: %u, Authorities: %u, Additional: %u\n",
-           questions, answers, authorities, additionals);
+           ntohs(dns.questions), ntohs(dns.answer_rrs),
+           authorities, additionals);
 
-    // Parse questions
     for (int i = 0; i < questions && offset < size; i++) {
         if (parse_dns_rr(data, size, &offset, 1) != 0) {
             printf("     Error parsing question %d\n", i + 1);
@@ -216,11 +248,11 @@ void parse_dns(const u_char *data, int size) {
         }
     }
 
-    // Parse answers
     for (int i = 0; i < answers && offset < size; i++) {
         if (parse_dns_rr(data, size, &offset, 0) != 0) {
             printf("     Error parsing answer %d\n", i + 1);
             break;
         }
     }
+    // Authorities/additionals skipped (offsets validated); counted above.
 }

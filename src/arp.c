@@ -1,19 +1,26 @@
 // ARP packet parsing
 #include "arp.h"
+#include "stats.h"
 #include <stdio.h>
+#include <string.h>
+#ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 // IP address formatting
 static void format_ip(u_int ip_addr, char *buffer, int size) {
     struct in_addr addr;
-    addr.s_addr = ip_addr;
-    inet_ntop(AF_INET, &addr, buffer, size);
+    memcpy(&addr.s_addr, &ip_addr, 4);
+    if (!inet_ntop(AF_INET, &addr, buffer, size) && size > 0)
+        snprintf(buffer, size, "?");
 }
 
 // MAC address formatting
-static void format_mac(const u_char *mac, char *buffer) {
-    sprintf(buffer, "%02X:%02X:%02X:%02X:%02X:%02X",
+static void format_mac(const u_char *mac, char *buffer, int bufsize) {
+    snprintf(buffer, bufsize, "%02X:%02X:%02X:%02X:%02X:%02X",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 }
 
@@ -23,15 +30,21 @@ void parse_arp(const u_char *data, int size) {
                size, (int)sizeof(arp_header_t));
         return;
     }
-    const arp_header_t *arp = (const arp_header_t *)data;
+    arp_header_t arp;
+    memcpy(&arp, data, sizeof(arp));
+    stats_increment("ARP", (uint32_t)size);
 
     // Validate packet
-    if (ntohs(arp->hardware_type) != 1) {
-        printf("ARP: Unsupported hardware type %u\n", ntohs(arp->hardware_type));
+    if (ntohs(arp.hardware_type) != 1) {
+        printf("ARP: Unsupported hardware type %u\n", ntohs(arp.hardware_type));
         return;
     }
-    if (ntohs(arp->protocol_type) != 0x0800) {
-        printf("ARP: Unsupported protocol type 0x%04X\n", ntohs(arp->protocol_type));
+    if (ntohs(arp.protocol_type) != 0x0800) {
+        printf("ARP: Unsupported protocol type 0x%04X\n", ntohs(arp.protocol_type));
+        return;
+    }
+    if (arp.hardware_size != 6 || arp.protocol_size != 4) {
+        printf("ARP: Bad sizes hlen=%u plen=%u\n", arp.hardware_size, arp.protocol_size);
         return;
     }
 
@@ -39,13 +52,13 @@ void parse_arp(const u_char *data, int size) {
     char sender_mac[18], target_mac[18];
     char sender_ip[16], target_ip[16];
 
-    format_mac(arp->sender_mac, sender_mac);
-    format_mac(arp->target_mac, target_mac);
-    format_ip(arp->sender_ip, sender_ip, sizeof(sender_ip));
-    format_ip(arp->target_ip, target_ip, sizeof(target_ip));
+    format_mac(arp.sender_mac, sender_mac, sizeof(sender_mac));
+    format_mac(arp.target_mac, target_mac, sizeof(target_mac));
+    format_ip(arp.sender_ip, sender_ip, sizeof(sender_ip));
+    format_ip(arp.target_ip, target_ip, sizeof(target_ip));
 
     // Operation type
-    u_short op = ntohs(arp->operation);
+    u_short op = ntohs(arp.operation);
     const char *op_name;
     switch (op) {
         case 1:  op_name = "ARP Request"; break;
@@ -66,8 +79,8 @@ void parse_arp(const u_char *data, int size) {
     }
 
     // Packet details
-    printf("     Hardware Type: Ethernet (0x%04X)\n", ntohs(arp->hardware_type));
-    printf("     Protocol Type: IPv4 (0x%04X)\n", ntohs(arp->protocol_type));
-    printf("     Hardware Size: %u bytes\n", arp->hardware_size);
-    printf("     Protocol Size: %u bytes\n", arp->protocol_size);
+    printf("     Hardware Type: Ethernet (0x%04X)\n", ntohs(arp.hardware_type));
+    printf("     Protocol Type: IPv4 (0x%04X)\n", ntohs(arp.protocol_type));
+    printf("     Hardware Size: %u bytes\n", arp.hardware_size);
+    printf("     Protocol Size: %u bytes\n", arp.protocol_size);
 }

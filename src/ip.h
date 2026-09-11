@@ -3,6 +3,12 @@
 #define IP_H
 
 #include <pcap.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <netinet/in.h>
+#endif
 
 // IPv4 header
 #pragma pack(push, 1)
