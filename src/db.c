@@ -62,6 +62,10 @@ int db_ensure_schema(void) {
         "arp BIGINT, arp_bytes BIGINT, dns BIGINT, dns_bytes BIGINT,"
         "http BIGINT, http_bytes BIGINT, https BIGINT, https_bytes BIGINT,"
         "dhcp BIGINT, dhcp_bytes BIGINT);";
+    const char *ddl3 =
+        "CREATE TABLE IF NOT EXISTS alerts("
+        "id SERIAL PRIMARY KEY, time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        "type VARCHAR(32), src VARCHAR(64), dst VARCHAR(64), detail TEXT);";
     PGresult *r = PQexec(conn, ddl1);
     if (PQresultStatus(r) != PGRES_COMMAND_OK) {
         fprintf(stderr, "[DB] Schema ensure failed: %s\n", PQerrorMessage(conn));
@@ -70,6 +74,13 @@ int db_ensure_schema(void) {
     }
     PQclear(r);
     r = PQexec(conn, ddl2);
+    if (PQresultStatus(r) != PGRES_COMMAND_OK) {
+        fprintf(stderr, "[DB] Schema ensure failed: %s\n", PQerrorMessage(conn));
+        PQclear(r);
+        return -1;
+    }
+    PQclear(r);
+    r = PQexec(conn, ddl3);
     if (PQresultStatus(r) != PGRES_COMMAND_OK) {
         fprintf(stderr, "[DB] Schema ensure failed: %s\n", PQerrorMessage(conn));
         PQclear(r);

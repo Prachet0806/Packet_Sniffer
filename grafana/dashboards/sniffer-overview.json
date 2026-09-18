@@ -1,0 +1,61 @@
+{
+  "title": "Sniffer Overview",
+  "uid": "sniffer-overview",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Packets/sec by interval (SUM over window)",
+      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "targets": [
+        {
+          "rawSql": "SELECT interval_start AS time, SUM(total_packets) AS \"packets\" FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour' GROUP BY interval_start ORDER BY interval_start",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Bytes by protocol",
+      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "targets": [
+        {
+          "rawSql": "SELECT interval_start AS time, SUM(tcp_bytes) AS \"tcp\", SUM(udp_bytes) AS \"udp\", SUM(dns_bytes) AS \"dns\", SUM(http_bytes) AS \"http\", SUM(https_bytes) AS \"https\" FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour' GROUP BY interval_start ORDER BY interval_start",
+          "format": "time_series"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total packets (1h SUM — Postgres stores interval deltas, JSON is cumulative)",
+      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(total_packets) FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour'",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Recent alerts",
+      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "targets": [
+        {
+          "rawSql": "SELECT time, type, src, dst, detail FROM alerts ORDER BY time DESC LIMIT 50",
+          "format": "table"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 8}
+    }
+  ]
+}

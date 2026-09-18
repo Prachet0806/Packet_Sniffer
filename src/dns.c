@@ -1,6 +1,8 @@
 // DNS packet parsing (hardened: no unaligned access, bounded compression)
 #include "dns.h"
 #include "stats.h"
+#include "logger.h"
+#include "security.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -48,7 +50,9 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
     if (!ok) return -1;
 
     if (is_question) {
+        sanitize_printable(name, sizeof(name));
         printf("     Question: %s (Type=%u, Class=%u)\n", name, type, class);
+        security_dns_name(security_peer_src(), name, type, 1, 0);
         return 0;
     }
 
@@ -61,6 +65,7 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
         return -1;
     }
 
+    sanitize_printable(name, sizeof(name));
     printf("     Answer: %s (Type=%u, Class=%u, TTL=%u)\n", name, type, class, ttl);
 
     switch (type) {
@@ -87,8 +92,10 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
         case DNS_TYPE_CNAME: {
             char cname[256] = {0};
             int temp_offset = *offset;
-            if (parse_dns_name(data, data_len, &temp_offset, cname, sizeof(cname)) >= 0)
+            if (parse_dns_name(data, data_len, &temp_offset, cname, sizeof(cname)) >= 0) {
+                sanitize_printable(cname, sizeof(cname));
                 printf("         CNAME: %s\n", cname);
+            }
             break;
         }
         case DNS_TYPE_MX: {
@@ -97,23 +104,29 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
                 int ok2 = 1;
                 u_short preference = read_u16(data, data_len, &tmp, &ok2);
                 char mx_name[256] = {0};
-                if (ok2 && parse_dns_name(data, data_len, &tmp, mx_name, sizeof(mx_name)) >= 0)
+                if (ok2 && parse_dns_name(data, data_len, &tmp, mx_name, sizeof(mx_name)) >= 0) {
+                    sanitize_printable(mx_name, sizeof(mx_name));
                     printf("         MX: %s (preference %u)\n", mx_name, preference);
+                }
             }
             break;
         }
         case DNS_TYPE_NS: {
             char ns_name[256] = {0};
             int temp_offset = *offset;
-            if (parse_dns_name(data, data_len, &temp_offset, ns_name, sizeof(ns_name)) >= 0)
+            if (parse_dns_name(data, data_len, &temp_offset, ns_name, sizeof(ns_name)) >= 0) {
+                sanitize_printable(ns_name, sizeof(ns_name));
                 printf("         NS: %s\n", ns_name);
+            }
             break;
         }
         case DNS_TYPE_PTR: {
             char ptr_name[256] = {0};
             int temp_offset = *offset;
-            if (parse_dns_name(data, data_len, &temp_offset, ptr_name, sizeof(ptr_name)) >= 0)
+            if (parse_dns_name(data, data_len, &temp_offset, ptr_name, sizeof(ptr_name)) >= 0) {
+                sanitize_printable(ptr_name, sizeof(ptr_name));
                 printf("         PTR: %s\n", ptr_name);
+            }
             break;
         }
         case DNS_TYPE_TXT: {
@@ -124,7 +137,12 @@ static int parse_dns_rr(const u_char *data, int data_len, int *offset, int is_qu
                 int str_len = *txt_data++;
                 txt_len--;
                 if (str_len <= 0 || str_len > txt_len) break;
-                printf("\"%.*s\" ", str_len, txt_data);
+                char chunk[256];
+                int cp = str_len < (int)sizeof(chunk) - 1 ? str_len : (int)sizeof(chunk) - 1;
+                memcpy(chunk, txt_data, cp);
+                chunk[cp] = '\0';
+                sanitize_printable(chunk, sizeof(chunk));
+                printf("\"%s\" ", chunk);
                 txt_data += str_len;
                 txt_len -= str_len;
             }
@@ -170,6 +188,12 @@ static int parse_dns_name(const u_char *data, int data_len, int *offset, char *n
             memcpy(&raw, data + *offset, 2);
             u_short pointer = ntohs(raw) & 0x3FFF;
             if (pointer >= data_len) return -1;
+
+            // Validate pointer target is a valid label start (not a compression pointer)
+            u_char target_len = data[pointer];
+            if ((target_len & DNS_COMPRESSION_MASK) == DNS_COMPRESSION_MASK) return -1;
+            if (target_len > 63) return -1;
+            if (pointer + 1 + target_len > data_len) return -1;
 
             *offset = pointer;
             continue;

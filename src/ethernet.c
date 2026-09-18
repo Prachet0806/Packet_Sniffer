@@ -52,7 +52,7 @@ void parse_ethernet(const u_char *data, int size) {
     // Strip stacked VLAN tags (802.1Q / 802.1ad)
     int vlan_depth = 0;
     while ((eth_type == 0x8100 || eth_type == 0x88A8 || eth_type == 0x9100) &&
-           vlan_depth < 2) {
+           vlan_depth < 8) {
         if (payload_size < (int)sizeof(struct vlan_tag)) {
             printf("Ethernet: Truncated VLAN tag\n");
             return;

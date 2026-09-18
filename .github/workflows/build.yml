@@ -1,0 +1,34 @@
+name: build
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: sudo apt-get update && sudo apt-get install -y cmake gcc libpcap-dev libpq-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release
+      - name: CTest
+        run: ctest --test-dir build --output-on-failure
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Npcap SDK
+        run: choco install npcap-sdk -y
+        shell: powershell
+      - name: Configure (MSVC)
+        # NOTE: CMake reads $ENV{NPCAP_SDK}; -D flag alone is ineffective.
+        run: |
+          $env:NPCAP_SDK = "C:/Program Files/Npcap-sdk"
+          cmake -S . -B build
+        shell: powershell
+      - name: Build
+        run: cmake --build build --config Release
+        shell: powershell
+      - name: CTest
+        run: ctest --test-dir build -C Release --output-on-failure
+        shell: powershell

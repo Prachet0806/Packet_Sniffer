@@ -1,23 +1,39 @@
--- Database Migration: Add DHCP Column
--- Description: Adds DHCP protocol tracking column to protocol_stats table
+-- Database Migration: bring protocol_stats up to the current schema
+-- Description: adds any missing per-protocol packet/byte columns, including
+-- DHCP. Fresh installs don't need this (the app's db_ensure_schema creates
+-- the full table); run it once against databases created by older versions.
 
--- Check if column exists before adding
 DO $$
+DECLARE
+    col TEXT;
+    cols TEXT[] := ARRAY[
+        'total_packets', 'total_bytes',
+        'ethernet', 'ethernet_bytes',
+        'ipv4', 'ipv4_bytes',
+        'ipv6', 'ipv6_bytes',
+        'tcp', 'tcp_bytes',
+        'udp', 'udp_bytes',
+        'icmp', 'icmp_bytes',
+        'arp', 'arp_bytes',
+        'dns', 'dns_bytes',
+        'http', 'http_bytes',
+        'https', 'https_bytes',
+        'dhcp', 'dhcp_bytes'
+    ];
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 
-        FROM information_schema.columns 
-        WHERE table_name = 'protocol_stats' 
-        AND column_name = 'dhcp'
-    ) THEN
-        -- Add DHCP column
-        ALTER TABLE protocol_stats 
-        ADD COLUMN dhcp BIGINT NOT NULL DEFAULT 0;
-        
-        RAISE NOTICE 'DHCP column added successfully';
-    ELSE
-        RAISE NOTICE 'DHCP column already exists, skipping';
-    END IF;
+    FOREACH col IN ARRAY cols LOOP
+        IF NOT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'protocol_stats'
+            AND column_name = col
+        ) THEN
+            EXECUTE format('ALTER TABLE protocol_stats ADD COLUMN %I BIGINT NOT NULL DEFAULT 0', col);
+            RAISE NOTICE 'Column % added successfully', col;
+        ELSE
+            RAISE NOTICE 'Column % already exists, skipping', col;
+        END IF;
+    END LOOP;
 END $$;
 
 -- Verify the change

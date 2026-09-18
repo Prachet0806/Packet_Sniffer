@@ -71,11 +71,18 @@ void stats_cleanup(void);
 void stats_increment(const char *proto, uint32_t pkt_len);
 
 // Save/load stats to/from JSON file (thread-safe)
-int stats_save_json(const char *filename);
-int stats_load_json(const char *filename);
+ // NOTE: JSON is a cumulative snapshot (counters keep running).
+ int stats_save_json(const char *filename);
+ int stats_load_json(const char *filename);
 
-// Save stats to PostgreSQL (thread-safe)
-int stats_save_postgres(const char *conninfo);
+ // Format stats as JSON string (compact or pretty)
+ // Returns number of bytes written (excluding null terminator)
+ int stats_format_json(char *out, int outlen, const ProtocolStats *snap, int pretty);
+
+ // Save stats to PostgreSQL (thread-safe)
+ // NOTE: interval semantics — counters reset after a successful insert,
+ // unlike the cumulative JSON snapshot.
+ int stats_save_postgres(const char *conninfo);
 
 #ifdef __cplusplus
 }

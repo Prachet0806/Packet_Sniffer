@@ -40,11 +40,37 @@ typedef struct {
 
 static PacketQueue queue;
 static pcap_t *g_handle = NULL;
-static volatile int g_stop = 0;
+static int g_stop = 0;
+static mutex_t g_stop_mutex;
 static int g_verbose = 0;
 static int g_dlt = DLT_EN10MB;
+static int g_offline = 0;
+
+static inline int get_g_stop(void) {
+    int val;
+    mutex_lock(&g_stop_mutex);
+    val = g_stop;
+    mutex_unlock(&g_stop_mutex);
+    return val;
+}
+
+static inline void set_g_stop(int val) {
+    mutex_lock(&g_stop_mutex);
+    g_stop = val;
+    mutex_unlock(&g_stop_mutex);
+}
 
 int sniffer_datalink(void) { return g_dlt; }
+int sniffer_is_offline(void) { return g_offline; }
+int sniffer_apply_filter(const char *bpf) {
+    if (!bpf || !bpf[0]) return -1;
+    if (g_offline || !g_handle) return -2; // live only
+    struct bpf_program fp;
+    if (pcap_compile(g_handle, &fp, bpf, 1, PCAP_NETMASK_UNKNOWN) == -1) return -1;
+    int rc = pcap_setfilter(g_handle, &fp);
+    pcap_freecode(&fp);
+    return rc;
+}
 
 void queue_init(PacketQueue *q) {
     q->head = q->tail = NULL;
@@ -53,6 +79,8 @@ void queue_init(PacketQueue *q) {
     q->shutdown = 0;
     mutex_init(&q->cs);
     cond_init(&q->cv);
+    mutex_init(&g_stop_mutex);
+    set_g_stop(0);
 }
 
 void queue_shutdown(PacketQueue *q) {
@@ -84,7 +112,7 @@ void queue_destroy(PacketQueue *q) {
 
 // Returns 0 on success, -1 if dropped (full / alloc fail / shutting down)
 int queue_push(PacketQueue *q, const struct pcap_pkthdr *header, const u_char *data) {
-    if (g_stop || q->shutdown) return -1;
+    if (get_g_stop() || q->shutdown) return -1;
     // Use caplen (actually captured), never len (wire length)
     bpf_u_int32 caplen = header->caplen;
     if (caplen == 0) return -1;
@@ -130,7 +158,7 @@ PacketNode* queue_pop(PacketQueue *q) {
     mutex_lock(&q->cs);
     for (;;) {
         if (q->head) break;
-        if (q->shutdown || g_stop) { mutex_unlock(&q->cs); return NULL; }
+        if (q->shutdown || get_g_stop()) { mutex_unlock(&q->cs); return NULL; }
 #ifdef _WIN32
         SleepConditionVariableCS(&q->cv, &q->cs, 500);
 #else
@@ -154,30 +182,36 @@ PacketNode* queue_pop(PacketQueue *q) {
 // MAC helper (Windows only; POSIX prints Unknown)
 static void print_mac(const char *guid) {
 #ifdef _WIN32
-    DWORD buflen = 0;
-    // Two-call pattern: first get required size
-    if (GetAdaptersInfo(NULL, &buflen) != ERROR_BUFFER_OVERFLOW) {
+    ULONG buflen = 0;
+    ULONG flags = GAA_FLAG_INCLUDE_PREFIX;
+    // First call to get required buffer size
+    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, NULL, &buflen) != ERROR_BUFFER_OVERFLOW) {
         printf(" (MAC: Unknown)");
         return;
     }
-    IP_ADAPTER_INFO *info = (IP_ADAPTER_INFO *)malloc(buflen);
+    IP_ADAPTER_ADDRESSES *info = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
     if (!info) { printf(" (MAC: Unknown)"); return; }
-    if (GetAdaptersInfo(info, &buflen) != ERROR_SUCCESS) {
+    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, info, &buflen) != ERROR_SUCCESS) {
         printf(" (MAC: Unknown)");
         free(info);
         return;
     }
-    PIP_ADAPTER_INFO p = info;
-    while (p) {
+    for (IP_ADAPTER_ADDRESSES *p = info; p; p = p->Next) {
         // guid looks like \Device\NPF_{GUID}; AdapterName is {GUID}
-        if (strstr(guid, p->AdapterName)) {
-            printf(" (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
-                   p->Address[0], p->Address[1], p->Address[2],
-                   p->Address[3], p->Address[4], p->Address[5]);
+        // Convert adapter name to GUID format for comparison
+        char adapter_guid[256];
+        int guid_len = snprintf(adapter_guid, sizeof(adapter_guid), "{%S}", p->AdapterName);
+        if (guid_len > 0 && strstr(guid, adapter_guid)) {
+            if (p->PhysicalAddressLength == 6) {
+                printf(" (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
+                       p->PhysicalAddress[0], p->PhysicalAddress[1], p->PhysicalAddress[2],
+                       p->PhysicalAddress[3], p->PhysicalAddress[4], p->PhysicalAddress[5]);
+            } else {
+                printf(" (MAC: Unknown)");
+            }
             free(info);
             return;
         }
-        p = p->Next;
     }
     free(info);
     printf(" (MAC: Unknown)");
@@ -187,11 +221,11 @@ static void print_mac(const char *guid) {
 #endif
 }
 
-// Packet capture handler
+// Packet capture handler (user cookie = pcap_dumper_t* or NULL)
 static void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data) {
-    (void)param;
-    if (g_stop) return;
+    if (get_g_stop()) return;
     if (g_verbose) printf("[Capture] caplen=%u len=%u\n", header->caplen, header->len);
+    if (param) pcap_dump(param, header, pkt_data);
     if (queue_push(&queue, header, pkt_data) != 0 && g_verbose)
         printf("[Capture] packet dropped (queue full/alloc fail)\n");
 }
@@ -226,18 +260,22 @@ static void *analysis_thread(void *param) {
 #endif
 
 static void request_stop(void) {
-    g_stop = 1;
+    set_g_stop(1);
     queue_shutdown(&queue);
     if (g_handle) pcap_breakloop(g_handle);
 }
 
 #ifdef _WIN32
 static BOOL WINAPI console_handler(DWORD ev) {
-    if (ev == CTRL_C_EVENT || ev == CTRL_CLOSE_EVENT) { request_stop(); return TRUE; }
+    if (ev == CTRL_C_EVENT || ev == CTRL_CLOSE_EVENT || ev == CTRL_BREAK_EVENT || 
+        ev == CTRL_LOGOFF_EVENT || ev == CTRL_SHUTDOWN_EVENT) { 
+        request_stop(); return TRUE; 
+    }
     return FALSE;
 }
 #else
 static void sigint_handler(int sig) { (void)sig; request_stop(); }
+static void sigterm_handler(int sig) { (void)sig; request_stop(); }
 #endif
 
 static int pick_device(pcap_if_t *alldevs, int n, int wanted) {
@@ -252,9 +290,41 @@ void start_sniffer() {
     if (env_v && env_v[0] == '1') g_verbose = 1;
     const char *env_iface = getenv("SNIFFER_IFACE"); // 1-based index or name substring
     const char *env_filter = getenv("SNIFFER_FILTER");
+    const char *read_path = getenv("SNIFFER_READ"); // offline replay input
+    const char *write_path = getenv("SNIFFER_WRITE");
+    int is_offline = (read_path && read_path[0]) ? 1 : 0;
 
-    pcap_if_t *alldevs = NULL, *d;
     char errbuf[PCAP_ERRBUF_SIZE] = {0};
+    pcap_t *adhandle = NULL;
+    char devname[512] = {0};
+    mutex_init(&g_stop_mutex);
+    set_g_stop(0);
+
+    // Capture options (live only; ignored in --read mode)
+    int snaplen = 65536;
+    int promisc = 1;
+    int timeout_ms = 1000;
+    const char *e;
+    if ((e = getenv("SNIFFER_SNAPLEN")) && atoi(e) >= 68 && atoi(e) <= 262144)
+        snaplen = atoi(e);
+    if ((e = getenv("SNIFFER_PROMISC")) && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'))
+        promisc = 0;
+    if ((e = getenv("SNIFFER_TIMEOUT_MS")) && atoi(e) >= 10 && atoi(e) <= 60000)
+        timeout_ms = atoi(e);
+
+if (is_offline) {
+        if (env_iface && env_iface[0])
+            fprintf(stderr, "[*] SNIFFER_READ set; ignoring SNIFFER_IFACE='%s'.\n", env_iface);
+        if (write_path && write_path[0])
+            fprintf(stderr, "[*] SNIFFER_READ set; ignoring SNIFFER_WRITE (use live capture to record).\n");
+        adhandle = pcap_open_offline(read_path, errbuf);
+        if (!adhandle) {
+            fprintf(stderr, "Unable to open pcap file '%s': %s\n", read_path, errbuf);
+            return;
+        }
+        snprintf(devname, sizeof(devname), "%s", read_path);
+    } else {
+    pcap_if_t *alldevs = NULL, *d;
     int i = 0;
 
     if (pcap_findalldevs(&alldevs, errbuf) == -1) {
@@ -330,15 +400,18 @@ void start_sniffer() {
         return;
     }
 
-    char devname[512];
     snprintf(devname, sizeof(devname), "%s", d->name);
 
-    pcap_t *adhandle = pcap_open_live(devname, 65536, 1, 1000, errbuf);
+    adhandle = pcap_open_live(devname, snaplen, promisc, timeout_ms, errbuf);
     if (!adhandle) {
         fprintf(stderr, "Unable to open adapter: %s\n", errbuf);
         pcap_freealldevs(alldevs);
         return;
     }
+    pcap_freealldevs(alldevs);
+    } // end live-device branch
+
+    g_offline = is_offline;
     g_handle = adhandle;
     g_dlt = pcap_datalink(adhandle);
 
@@ -355,14 +428,26 @@ void start_sniffer() {
         pcap_freecode(&fp);
     }
 
-    printf("Listening on %s (DLT=%d)... Press Ctrl+C to stop.\n", devname, g_dlt);
-    pcap_freealldevs(alldevs);
+    printf("Listening on %s (DLT=%d%s)... Press Ctrl+C to stop.\n",
+           devname, g_dlt,
+           is_offline ? ", offline replay" : "");
+
+    pcap_dumper_t *dumper = NULL;
+    if (!is_offline && write_path && write_path[0]) {
+        dumper = pcap_dump_open(adhandle, write_path);
+        if (!dumper) {
+            fprintf(stderr, "Could not open %s for writing: %s\n",
+                    write_path, pcap_geterr(adhandle));
+        } else {
+            printf("Recording capture to %s\n", write_path);
+        }
+    }
 
 #ifdef _WIN32
     SetConsoleCtrlHandler(console_handler, TRUE);
 #else
     signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigint_handler);
+    signal(SIGTERM, sigterm_handler);
 #endif
 
     // Initialize queue and start analysis thread
@@ -387,8 +472,8 @@ void start_sniffer() {
     }
 #endif
 
-    // Start capture loop (main thread); breaks on Ctrl+C / error
-    int rc = pcap_loop(adhandle, 0, packet_handler, NULL);
+    // Start capture loop (main thread); breaks on Ctrl+C / error / EOF (offline rc 0/2 ok)
+    int rc = pcap_loop(adhandle, 0, packet_handler, (u_char *)dumper);
     if (rc == -1) fprintf(stderr, "pcap_loop error: %s\n", pcap_geterr(adhandle));
 
     request_stop();
@@ -399,7 +484,15 @@ void start_sniffer() {
     pthread_join(thr, NULL);
 #endif
     printf("Queue drained. Dropped (queue full): %d\n", queue.dropped);
+    if (!is_offline) {
+    struct pcap_stat ps;
+    if (pcap_stats(adhandle, &ps) == 0) {
+        printf("Kernel stats: received=%u dropped=%u ifdropped=%u\n",
+               ps.ps_recv, ps.ps_drop, ps.ps_ifdrop);
+    }
+    }
     queue_destroy(&queue);
+    if (dumper) pcap_dump_close(dumper);
     pcap_close(adhandle);
     g_handle = NULL;
 }

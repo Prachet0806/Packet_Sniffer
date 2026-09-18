@@ -15,7 +15,7 @@ static inline void mutex_unlock(mutex_t *m) { LeaveCriticalSection(m); }
 static inline void mutex_destroy(mutex_t *m) { DeleteCriticalSection(m); }
 static inline void cond_init(cond_t *c) { InitializeConditionVariable(c); }
 static inline void sleep_ms(unsigned ms) { Sleep(ms); }
-#define strncasecmp_compat _strnicmp
+static inline int strncasecmp_compat(const char *s1, const char *s2, size_t n) { return _strnicmp(s1, s2, n); }
 #else
 #include <pthread.h>
 #include <unistd.h>
