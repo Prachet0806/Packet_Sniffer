@@ -31,8 +31,10 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 #### Transport Layer
 - **TCP**: Port analysis, sequence numbers, flags, window size
 - **UDP**: Port analysis, length validation
-- **ICMPv4**: Message types (Echo, Unreachable, Redirect, etc.)
-- **ICMPv6**: IPv6 control messages (Echo, Neighbor Discovery, etc.)
+- **ICMPv4**: Message types (Echo, Unreachable, Redirect, etc.) + embedded
+  offending-packet attribution for error messages
+- **ICMPv6**: IPv6 control messages (Echo, Neighbor Discovery, etc.) + embedded
+  packet attribution for error types 1-4
 
 #### Application Layer
 - **DNS**: Complete DNS query/response analysis
@@ -46,8 +48,10 @@ A high-performance, multi-threaded network packet sniffer and protocol analyzer 
 - **HTTPS/TLS**: TLS protocol analysis
   - TLS record type identification
   - TLS version detection (SSL 3.0–TLS 1.2; 1.3 uses legacy `0x0303` on the wire)
+  - ClientHello SNI extraction
   - Handshake and application data tracking
-- **DHCP**: DISCOVER/OFFER/REQUEST/ACK parsing (UDP ports 67/68)
+- **DHCP**: DISCOVER/OFFER/REQUEST/ACK parsing (UDP ports 67/68) + minimal
+  DHCPv6 classifier (ports 546/547)
   - Magic-cookie validation, message-type/lease/hostname options
   - See `db_migration_add_dhcp.sql`, `AWS_RDS_QUICK_START.md`
 
@@ -98,24 +102,46 @@ default to JSON-only unless a MinGW-compatible libpq is provided.
 ```bash
 # Copy secrets template first
 copy .env.example .env   # Windows / cp .env.example .env on Linux
-# Build and run PostgreSQL + Grafana + sniffer
+# Live capture (needs NET_RAW/NET_ADMIN) + Postgres + provisioned Grafana:
 docker compose up --build -d
-
-# Sniffer needs capture privileges; compose uses network_mode: host +
-# cap_add NET_RAW/NET_ADMIN. Override at runtime:
-#   SNIFFER_IFACE=1 SNIFFER_FILTER="tcp port 80" STATS_FLUSH_MS=60000
+# Deterministic demo without privileges (replay profile):
+docker compose --profile replay up --build replay
+# Grafana :3000 (admin/admin) uses provisioned Postgres datasource, no manual setup.
+# sniffer service uses bridge networking (host=postgres); network_mode:host is
+# intentionally NOT used because it breaks compose DNS for host=postgres.
 ```
+
+## Quickstart (replay, no admin) vs Live vs Docker vs RDS
+- Replay (deterministic, no root): `sniffer --read tests/pcaps/eth-tcp-http.pcap --no-db --quiet`
+- Live: `sniffer --iface 1 --filter "tcp port 80" --verbose` (admin/root or NET_RAW)
+- Docker: see above; `replay` profile feeds Postgres/Grafana from `/pcaps`.
+- RDS: set `AWS_RDS_CONNINFO` (preferred) or `DATABASE_URL`; schema canonical key is
+  `protocol_stats.interval_start` (interval deltas in Postgres, cumulative in `stats.json`;
+  dashboards must `SUM()` over window, not read last row as gauge).
+- API (opt-in): `sniffer --api-port 8080 --api-token $TOKEN` then
+  `curl -H "Authorization: Bearer $TOKEN" localhost:8080/health|/stats|/alerts`.
+  Default bind `127.0.0.1` (`--api-bind 0.0.0.0` for Docker). `POST /filter {"bpf":"tcp port 80"}`
+  is live-only (rejected in `--read` mode). Unauth -> 401, burst -> 429.
+- Alerts (rule-based, no ML): SYN-scan, DNS-tunnel heuristics, ARP-spoof (gratuitous/flap),
+  DHCP-starvation (DISCOVER burst), TLS SNI length. Sink: stderr `[ALERT]` + `GET /alerts`
+  + `alerts(time,type,src,dst,detail)` table + Grafana panel. Blind spots: no TCP reassembly,
+  non-first frag skipped, IPv6 frag/ESP/AH stop, VLAN>2 truncated, port-heuristic evasion,
+  DNS auth/addl skipped, only first ClientHello SNI (ECH/TLS1.3 hidden).
 
 ## Usage
 
-1. **Run the application**:
+1. **Run the application** (capture needs admin/root or `NET_RAW`/`NET_ADMIN`):
    ```bash
    ./build/sniffer --help
    ./build/sniffer --iface 1 --filter "tcp port 80" --verbose
+   ./build/sniffer --iface eth0 --no-promisc --snaplen 4096 --write out.pcap --quiet
    # Env alternatives: SNIFFER_IFACE, SNIFFER_FILTER, SNIFFER_VERBOSE=1,
+   #   SNIFFER_SNAPLEN, SNIFFER_PROMISC=0, SNIFFER_TIMEOUT_MS, SNIFFER_WRITE,
    #   DATABASE_URL="host=localhost port=5432 dbname=snifferdb user=sniffer password=...",
-   #   STATS_FLUSH_MS=60000, --no-db for JSON-only
+   #   AWS_RDS_CONNINFO (preferred for RDS), STATS_FLUSH_MS=60000, LOG_LEVEL=0-3,
+   #   --no-db for JSON-only
    ```
+   Kernel drop counters (`pcap_stats`) and queue drops print on exit.
 
 2. **Select network interface**:
    - Without `--iface`/`SNIFFER_IFACE` the program lists interfaces and prompts.
@@ -128,7 +154,11 @@ docker compose up --build -d
    - Statistics are collected and can be exported to JSON or PostgreSQL
 
 4. **View statistics**:
-   - Statistics are automatically saved to `stats.json`
+   - Statistics are automatically saved to `stats.json` (cumulative snapshot,
+     git-ignored) every flush interval
+   - PostgreSQL inserts are per-interval (counters reset after a successful
+     insert) — see `STATS_FLUSH_MS`, `db_ensure_schema()`, and
+     `db_migration_add_dhcp.sql` for older databases
    - Configure PostgreSQL connection for database storage
    - Use Grafana (via Docker Compose) for visualization
 
@@ -175,7 +205,8 @@ TCP: 192.168.1.100:54321 -> 93.184.216.34:80, Seq=1234567890 Ack=987654321, Win=
 [Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
 IPv4: 192.168.1.100 -> 172.217.164.110, TTL=64, Proto=6, Len=114
 TCP: 192.168.1.100:54322 -> 172.217.164.110:443, Seq=2345678901 Ack=0, Win=65535 [SYN]
-HTTPS: 192.168.1.100:54322 -> 172.217.164.110:443, TLS Record: Handshake, Version=TLS 1.3, Length=89
+HTTPS: 192.168.1.100:54322 -> 172.217.164.110:443, TLS Record: Handshake, Version=TLS 1.2-or-1.3-wire, Length=89
+HTTPS:   SNI=example.com
 ```
 
 ## Technical Details
@@ -183,7 +214,9 @@ HTTPS: 192.168.1.100:54322 -> 172.217.164.110:443, TLS Record: Handshake, Versio
 ### Threading Model
 - **Capture Thread**: Continuously captures packets using pcap_loop()
 - **Analysis Thread**: Processes queued packets through protocol stack
-- **Thread-safe Queue**: Uses Windows Critical Sections and Condition Variables
+- **Thread-safe Queue**: Critical Sections / pthread mutexes + condition variables
+- **Thread-safe Logging**: All log output serialized through `logger.c`; packet-derived
+  strings are sanitized (non-printables → `.`) against terminal-escape injection
 
 ### Memory Management
 - Dynamic packet buffer allocation
@@ -346,8 +379,8 @@ CREATE TABLE IF NOT EXISTS protocol_stats (
 - [x] Database integration (incl. `db_migration_add_dhcp.sql`, AWS RDS docs)
 - [x] Docker containerization
 - [x] VLAN (802.1Q) support
-- [ ] Packet filtering capabilities
-- [ ] PCAP file export
+- [x] Packet filtering capabilities (`--filter` BPF)
+- [x] PCAP file export (`--write out.pcap`)
 - [ ] GUI interface
 - [ ] REST API for remote access
 - [ ] Real-time Grafana dashboards

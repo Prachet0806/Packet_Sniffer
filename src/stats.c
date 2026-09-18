@@ -67,14 +67,14 @@ static void unlock(void) {
 }
 
 #ifdef HAVE_LIBPQ
-static void pg_connect(void) {
-    if (!postgres_conninfo[0] || pg_conn) return;
+static int pg_connect(void) {
+    if (!postgres_conninfo[0] || pg_conn) return 0;
     pg_conn = PQconnectdb(postgres_conninfo);
     if (PQstatus(pg_conn) != CONNECTION_OK) {
         printf("[!] PostgreSQL connection failed: %s\n", PQerrorMessage(pg_conn));
         PQfinish(pg_conn);
         pg_conn = NULL;
-        return;
+        return -1;
     }
     // Ensure schema exists
     const char *ddl =
@@ -86,12 +86,21 @@ static void pg_connect(void) {
         "udp BIGINT, udp_bytes BIGINT, icmp BIGINT, icmp_bytes BIGINT,"
         "arp BIGINT, arp_bytes BIGINT, dns BIGINT, dns_bytes BIGINT,"
         "http BIGINT, http_bytes BIGINT, https BIGINT, https_bytes BIGINT,"
-        "dhcp BIGINT, dhcp_bytes BIGINT);";
+        "dhcp BIGINT, dhcp_bytes BIGINT);"
+        "CREATE TABLE IF NOT EXISTS alerts("
+        "id SERIAL PRIMARY KEY, time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        "type VARCHAR(32), src VARCHAR(64), dst VARCHAR(64), detail TEXT);";
     PGresult *r = PQexec(pg_conn, ddl);
-    if (PQresultStatus(r) != PGRES_COMMAND_OK)
+    if (PQresultStatus(r) != PGRES_COMMAND_OK) {
         printf("[!] stats schema ensure failed: %s\n", PQerrorMessage(pg_conn));
+        PQclear(r);
+        return -1;
+    }
     PQclear(r);
+    return 0;
 }
+#else
+static int pg_connect(void) { return -1; }
 #endif
 
 // ---------------------- Initialization ----------------------
@@ -110,8 +119,11 @@ void stats_init(const char *conninfo) {
     stats_load_json(JSON_FILE);
 
 #ifdef HAVE_LIBPQ
-    if (postgres_conninfo[0]) pg_connect();
-    else printf("[stats] No DATABASE_URL; PostgreSQL disabled (JSON only).\n");
+    if (postgres_conninfo[0]) {
+        if (pg_connect() != 0) {
+            printf("[stats] PostgreSQL connection failed; continuing in JSON-only mode.\n");
+        }
+    } else printf("[stats] No DATABASE_URL; PostgreSQL disabled (JSON only).\n");
 #else
     if (postgres_conninfo[0])
         printf("[stats] Built without libpq; PostgreSQL disabled (JSON only).\n");
@@ -174,6 +186,64 @@ void stats_increment(const char *proto, uint32_t pkt_len) {
     unlock();
 }
 
+// Format stats as JSON string
+// pretty=1: pretty-printed with newlines; pretty=0: compact
+int stats_format_json(char *out, int outlen, const ProtocolStats *snap, int pretty) {
+    if (pretty) {
+        return snprintf(out, (size_t)outlen,
+            "{\n"
+            "  \"total_packets\": %" PRIu64 ",\n"
+            "  \"total_bytes\": %" PRIu64 ",\n"
+            "  \"ethernet\": %" PRIu64 ", \"ethernet_bytes\": %" PRIu64 ",\n"
+            "  \"ipv4\": %" PRIu64 ", \"ipv4_bytes\": %" PRIu64 ",\n"
+            "  \"ipv6\": %" PRIu64 ", \"ipv6_bytes\": %" PRIu64 ",\n"
+            "  \"tcp\": %" PRIu64 ", \"tcp_bytes\": %" PRIu64 ",\n"
+            "  \"udp\": %" PRIu64 ", \"udp_bytes\": %" PRIu64 ",\n"
+            "  \"icmp\": %" PRIu64 ", \"icmp_bytes\": %" PRIu64 ",\n"
+            "  \"arp\": %" PRIu64 ", \"arp_bytes\": %" PRIu64 ",\n"
+            "  \"dns\": %" PRIu64 ", \"dns_bytes\": %" PRIu64 ",\n"
+            "  \"http\": %" PRIu64 ", \"http_bytes\": %" PRIu64 ",\n"
+            "  \"https\": %" PRIu64 ", \"https_bytes\": %" PRIu64 ",\n"
+            "  \"dhcp\": %" PRIu64 ", \"dhcp_bytes\": %" PRIu64 "\n"
+            "}\n",
+            snap->total_packets, snap->total_bytes,
+            snap->ethernet, snap->ethernet_bytes,
+            snap->ipv4, snap->ipv4_bytes,
+            snap->ipv6, snap->ipv6_bytes,
+            snap->tcp, snap->tcp_bytes,
+            snap->udp, snap->udp_bytes,
+            snap->icmp, snap->icmp_bytes,
+            snap->arp, snap->arp_bytes,
+            snap->dns, snap->dns_bytes,
+            snap->http, snap->http_bytes,
+            snap->https, snap->https_bytes,
+            snap->dhcp, snap->dhcp_bytes
+        );
+    } else {
+        return snprintf(out, (size_t)outlen,
+            "{\"total_packets\":%llu,\"total_bytes\":%llu,"
+            "\"ethernet\":%llu,\"ethernet_bytes\":%llu,"
+            "\"ipv4\":%llu,\"ipv4_bytes\":%llu,\"ipv6\":%llu,\"ipv6_bytes\":%llu,"
+            "\"tcp\":%llu,\"tcp_bytes\":%llu,\"udp\":%llu,\"udp_bytes\":%llu,"
+            "\"icmp\":%llu,\"icmp_bytes\":%llu,\"arp\":%llu,\"arp_bytes\":%llu,"
+            "\"dns\":%llu,\"dns_bytes\":%llu,\"http\":%llu,\"http_bytes\":%llu,"
+            "\"https\":%llu,\"https_bytes\":%llu,\"dhcp\":%llu,\"dhcp_bytes\":%llu}",
+            (unsigned long long)snap->total_packets, (unsigned long long)snap->total_bytes,
+            (unsigned long long)snap->ethernet, (unsigned long long)snap->ethernet_bytes,
+            (unsigned long long)snap->ipv4, (unsigned long long)snap->ipv4_bytes,
+            (unsigned long long)snap->ipv6, (unsigned long long)snap->ipv6_bytes,
+            (unsigned long long)snap->tcp, (unsigned long long)snap->tcp_bytes,
+            (unsigned long long)snap->udp, (unsigned long long)snap->udp_bytes,
+            (unsigned long long)snap->icmp, (unsigned long long)snap->icmp_bytes,
+            (unsigned long long)snap->arp, (unsigned long long)snap->arp_bytes,
+            (unsigned long long)snap->dns, (unsigned long long)snap->dns_bytes,
+            (unsigned long long)snap->http, (unsigned long long)snap->http_bytes,
+            (unsigned long long)snap->https, (unsigned long long)snap->https_bytes,
+            (unsigned long long)snap->dhcp, (unsigned long long)snap->dhcp_bytes
+        );
+    }
+}
+
 // ---------------------- JSON Save/Load (atomic, lock-free I/O) ----------------------
 int stats_save_json(const char *filename) {
     ProtocolStats snap;
@@ -184,39 +254,20 @@ int stats_save_json(const char *filename) {
     FILE *fp = fopen(tmp, "w");
     if (!fp) return -1;
 
-    fprintf(fp,
-        "{\n"
-        "  \"total_packets\": %" PRIu64 ",\n"
-        "  \"total_bytes\": %" PRIu64 ",\n"
-        "  \"ethernet\": %" PRIu64 ", \"ethernet_bytes\": %" PRIu64 ",\n"
-        "  \"ipv4\": %" PRIu64 ", \"ipv4_bytes\": %" PRIu64 ",\n"
-        "  \"ipv6\": %" PRIu64 ", \"ipv6_bytes\": %" PRIu64 ",\n"
-        "  \"tcp\": %" PRIu64 ", \"tcp_bytes\": %" PRIu64 ",\n"
-        "  \"udp\": %" PRIu64 ", \"udp_bytes\": %" PRIu64 ",\n"
-        "  \"icmp\": %" PRIu64 ", \"icmp_bytes\": %" PRIu64 ",\n"
-        "  \"arp\": %" PRIu64 ", \"arp_bytes\": %" PRIu64 ",\n"
-        "  \"dns\": %" PRIu64 ", \"dns_bytes\": %" PRIu64 ",\n"
-        "  \"http\": %" PRIu64 ", \"http_bytes\": %" PRIu64 ",\n"
-        "  \"https\": %" PRIu64 ", \"https_bytes\": %" PRIu64 ",\n"
-        "  \"dhcp\": %" PRIu64 ", \"dhcp_bytes\": %" PRIu64 "\n"
-        "}\n",
-        snap.total_packets, snap.total_bytes,
-        snap.ethernet, snap.ethernet_bytes,
-        snap.ipv4, snap.ipv4_bytes,
-        snap.ipv6, snap.ipv6_bytes,
-        snap.tcp, snap.tcp_bytes,
-        snap.udp, snap.udp_bytes,
-        snap.icmp, snap.icmp_bytes,
-        snap.arp, snap.arp_bytes,
-        snap.dns, snap.dns_bytes,
-        snap.http, snap.http_bytes,
-        snap.https, snap.https_bytes,
-        snap.dhcp, snap.dhcp_bytes
-    );
+    char json[2048];
+    stats_format_json(json, sizeof(json), &snap, 1);
+    if (fprintf(fp, "%s", json) < 0) {
+        fclose(fp);
+        remove(tmp);
+        return -1;
+    }
 
     if (fclose(fp) != 0) { remove(tmp); return -1; }
-    // Atomic replace
-    if (rename(tmp, filename) != 0) { remove(tmp); return -1; }
+    // Atomic replace (POSIX). On Windows rename() fails if dest exists, so retry after remove.
+    if (rename(tmp, filename) != 0) {
+        remove(filename);
+        if (rename(tmp, filename) != 0) { remove(tmp); return -1; }
+    }
     return 0;
 }
 
@@ -224,42 +275,64 @@ int stats_load_json(const char *filename) {
     FILE *fp = fopen(filename, "r");
     if (!fp) return -1;
 
+    // Parse without holding the lock (no lock-held I/O), then commit.
+    ProtocolStats tmp; memset(&tmp, 0, sizeof(tmp));
+    // Seed with current values so missing keys preserve counters
+    lock(); tmp = stats; unlock();
     char line[256];
-    lock();
     while (fgets(line, sizeof(line), fp)) {
-        char key[64];
-        unsigned long long value;
-        // Tolerates '  "key": 123,' lines; ignores braces/whitespace
-        if (sscanf(line, " \"%63[^\"]\" : %llu", key, &value) == 2 ||
-            sscanf(line, " \"%63[^\"]\": %llu", key, &value) == 2) {
-            if (strcmp(key,"total_packets")==0) stats.total_packets=value;
-            else if (strcmp(key,"total_bytes")==0) stats.total_bytes=value;
-            else if (strcmp(key,"ethernet")==0) stats.ethernet=value;
-            else if (strcmp(key,"ethernet_bytes")==0) stats.ethernet_bytes=value;
-            else if (strcmp(key,"ipv4")==0) stats.ipv4=value;
-            else if (strcmp(key,"ipv4_bytes")==0) stats.ipv4_bytes=value;
-            else if (strcmp(key,"ipv6")==0) stats.ipv6=value;
-            else if (strcmp(key,"ipv6_bytes")==0) stats.ipv6_bytes=value;
-            else if (strcmp(key,"tcp")==0) stats.tcp=value;
-            else if (strcmp(key,"tcp_bytes")==0) stats.tcp_bytes=value;
-            else if (strcmp(key,"udp")==0) stats.udp=value;
-            else if (strcmp(key,"udp_bytes")==0) stats.udp_bytes=value;
-            else if (strcmp(key,"icmp")==0) stats.icmp=value;
-            else if (strcmp(key,"icmp_bytes")==0) stats.icmp_bytes=value;
-            else if (strcmp(key,"arp")==0) stats.arp=value;
-            else if (strcmp(key,"arp_bytes")==0) stats.arp_bytes=value;
-            else if (strcmp(key,"dns")==0) stats.dns=value;
-            else if (strcmp(key,"dns_bytes")==0) stats.dns_bytes=value;
-            else if (strcmp(key,"http")==0) stats.http=value;
-            else if (strcmp(key,"http_bytes")==0) stats.http_bytes=value;
-            else if (strcmp(key,"https")==0) stats.https=value;
-            else if (strcmp(key,"https_bytes")==0) stats.https_bytes=value;
-            else if (strcmp(key,"dhcp")==0) stats.dhcp=value;
-            else if (strcmp(key,"dhcp_bytes")==0) stats.dhcp_bytes=value;
+        char *p = line;
+        // Skip whitespace
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        // Expect '"key"' at start
+        if (*p != '"') continue;
+        p++;
+        char key[64] = {0};
+        int ki = 0;
+        // Read key until '"' or buffer full
+        while (*p && *p != '"' && ki < 63) {
+            key[ki++] = *p++;
         }
+        if (*p != '"') continue; // Unterminated key
+        p++; // skip closing "
+        // Skip whitespace and colon
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        if (*p != ':') continue;
+        p++;
+        // Skip whitespace
+        while (*p && (*p == ' ' || *p == '\t')) p++;
+        // Parse unsigned long long
+        char *endptr;
+        unsigned long long value = strtoull(p, &endptr, 10);
+        if (endptr == p) continue; // No digits parsed
+        
+        if (strcmp(key,"total_packets")==0) tmp.total_packets=value;
+        else if (strcmp(key,"total_bytes")==0) tmp.total_bytes=value;
+        else if (strcmp(key,"ethernet")==0) tmp.ethernet=value;
+        else if (strcmp(key,"ethernet_bytes")==0) tmp.ethernet_bytes=value;
+        else if (strcmp(key,"ipv4")==0) tmp.ipv4=value;
+        else if (strcmp(key,"ipv4_bytes")==0) tmp.ipv4_bytes=value;
+        else if (strcmp(key,"ipv6")==0) tmp.ipv6=value;
+        else if (strcmp(key,"ipv6_bytes")==0) tmp.ipv6_bytes=value;
+        else if (strcmp(key,"tcp")==0) tmp.tcp=value;
+        else if (strcmp(key,"tcp_bytes")==0) tmp.tcp_bytes=value;
+        else if (strcmp(key,"udp")==0) tmp.udp=value;
+        else if (strcmp(key,"udp_bytes")==0) tmp.udp_bytes=value;
+        else if (strcmp(key,"icmp")==0) tmp.icmp=value;
+        else if (strcmp(key,"icmp_bytes")==0) tmp.icmp_bytes=value;
+        else if (strcmp(key,"arp")==0) tmp.arp=value;
+        else if (strcmp(key,"arp_bytes")==0) tmp.arp_bytes=value;
+        else if (strcmp(key,"dns")==0) tmp.dns=value;
+        else if (strcmp(key,"dns_bytes")==0) tmp.dns_bytes=value;
+        else if (strcmp(key,"http")==0) tmp.http=value;
+        else if (strcmp(key,"http_bytes")==0) tmp.http_bytes=value;
+        else if (strcmp(key,"https")==0) tmp.https=value;
+        else if (strcmp(key,"https_bytes")==0) tmp.https_bytes=value;
+        else if (strcmp(key,"dhcp")==0) tmp.dhcp=value;
+        else if (strcmp(key,"dhcp_bytes")==0) tmp.dhcp_bytes=value;
     }
-    unlock();
     fclose(fp);
+    lock(); stats = tmp; unlock();
     return 0;
 }
 

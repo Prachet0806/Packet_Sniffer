@@ -68,9 +68,11 @@ desktop.ini
 # Project specific
 # Keep source files but ignore compiled outputs
 *.pcap
+!tests/pcaps/*.pcap
 *.cap
 capture_*.log
 analysis_*.log
+stats.json
 stats.json.tmp
 pgdata/*
 

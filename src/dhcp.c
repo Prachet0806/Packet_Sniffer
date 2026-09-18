@@ -2,6 +2,7 @@
 #include "dhcp.h"
 #include "stats.h"
 #include "logger.h"
+#include "security.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -133,30 +134,33 @@ static void parse_dhcp_options(const u_char *options, int options_len,
                 
             case DHCP_OPT_SUBNET_MASK:
                 if (len == 4) {
-                    char mask[INET_ADDRSTRLEN];
+                    char mask[INET_ADDRSTRLEN] = "?";
                     struct in_addr addr;
                     memcpy(&addr.s_addr, opt_data, 4);
-                    inet_ntop(AF_INET, &addr, mask, sizeof(mask));
+                    if (!inet_ntop(AF_INET, &addr, mask, sizeof(mask)))
+                        snprintf(mask, sizeof(mask), "?");
                     LOG_DEBUG_SIMPLE("  Subnet Mask: %s\n", mask);
                 }
                 break;
-                
+
             case DHCP_OPT_ROUTER:
                 if (len >= 4) {
-                    char router[INET_ADDRSTRLEN];
+                    char router[INET_ADDRSTRLEN] = "?";
                     struct in_addr addr;
                     memcpy(&addr.s_addr, opt_data, 4);
-                    inet_ntop(AF_INET, &addr, router, sizeof(router));
+                    if (!inet_ntop(AF_INET, &addr, router, sizeof(router)))
+                        snprintf(router, sizeof(router), "?");
                     LOG_DEBUG_SIMPLE("  Router: %s\n", router);
                 }
                 break;
-                
+
             case DHCP_OPT_DNS_SERVER:
                 if (len >= 4) {
-                    char dns[INET_ADDRSTRLEN];
+                    char dns[INET_ADDRSTRLEN] = "?";
                     struct in_addr addr;
                     memcpy(&addr.s_addr, opt_data, 4);
-                    inet_ntop(AF_INET, &addr, dns, sizeof(dns));
+                    if (!inet_ntop(AF_INET, &addr, dns, sizeof(dns)))
+                        snprintf(dns, sizeof(dns), "?");
                     LOG_DEBUG_SIMPLE("  DNS Server: %s\n", dns);
                 }
                 break;
@@ -187,6 +191,16 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
         return;
     }
 
+    // Validate header fields before trusting them
+    if (dhcp.op != 1 && dhcp.op != 2) {
+        LOG_DEBUG_SIMPLE("DHCP: Bad op %u\n", dhcp.op);
+        return;
+    }
+    if (dhcp.hlen > 16) {
+        LOG_DEBUG_SIMPLE("DHCP: Bad hlen %u\n", dhcp.hlen);
+        return;
+    }
+
     // Increment stats (with byte length)
     stats_increment("DHCP", (uint32_t)size);
 
@@ -206,22 +220,22 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
 
     if (dhcp.ciaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.ciaddr, 4);
-        inet_ntop(AF_INET, &addr, ciaddr, sizeof(ciaddr));
+        if (!inet_ntop(AF_INET, &addr, ciaddr, sizeof(ciaddr))) ciaddr[0] = '\0';
     }
 
     if (dhcp.yiaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.yiaddr, 4);
-        inet_ntop(AF_INET, &addr, yiaddr, sizeof(yiaddr));
+        if (!inet_ntop(AF_INET, &addr, yiaddr, sizeof(yiaddr))) yiaddr[0] = '\0';
     }
 
     if (dhcp.siaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.siaddr, 4);
-        inet_ntop(AF_INET, &addr, siaddr, sizeof(siaddr));
+        if (!inet_ntop(AF_INET, &addr, siaddr, sizeof(siaddr))) siaddr[0] = '\0';
     }
 
     if (dhcp.giaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.giaddr, 4);
-        inet_ntop(AF_INET, &addr, giaddr, sizeof(giaddr));
+        if (!inet_ntop(AF_INET, &addr, giaddr, sizeof(giaddr))) giaddr[0] = '\0';
     }
     
     // Parse options
@@ -244,6 +258,7 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
            get_dhcp_op_name(dhcp.op),
            msg_type ? get_dhcp_message_type(msg_type) : "UNKNOWN",
            xid);
+    security_dhcp(msg_type, dhcp.chaddr, xid, secs, flags);
 
     // Print additional details in DEBUG mode
     LOG_DEBUG_SIMPLE("  Hardware: Type=%u, Len=%u, Hops=%u\n",
@@ -267,15 +282,16 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
     if (siaddr[0]) LOG_DEBUG_SIMPLE("  Server IP: %s\n", siaddr);
     if (giaddr[0]) LOG_DEBUG_SIMPLE("  Gateway IP: %s\n", giaddr);
     
-    // Print hostname if present
+    // Print hostname if present (sanitized: packet bytes may contain escapes)
     if (hostname[0]) {
+        sanitize_printable(hostname, sizeof(hostname));
         LOG_DEBUG_SIMPLE("  Hostname: %s\n", hostname);
     }
-    
+
     // Print requested IP if present
     if (requested_ip != 0) {
         memcpy(&addr.s_addr, &requested_ip, 4);
-        char req_ip[INET_ADDRSTRLEN];
+        char req_ip[INET_ADDRSTRLEN] = "?";
         inet_ntop(AF_INET, &addr, req_ip, sizeof(req_ip));
         LOG_DEBUG_SIMPLE("  Requested IP: %s\n", req_ip);
     }
@@ -283,8 +299,41 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
     // Print server ID if present
     if (server_id != 0) {
         memcpy(&addr.s_addr, &server_id, 4);
-        char srv_id[INET_ADDRSTRLEN];
+        char srv_id[INET_ADDRSTRLEN] = "?";
         inet_ntop(AF_INET, &addr, srv_id, sizeof(srv_id));
         LOG_DEBUG_SIMPLE("  Server ID: %s\n", srv_id);
     }
+}
+
+static const char *dhcpv6_msg_name(uint8_t t) {
+    switch (t) {
+        case 1: return "SOLICIT";
+        case 2: return "ADVERTISE";
+        case 3: return "REQUEST";
+        case 4: return "CONFIRM";
+        case 5: return "RENEW";
+        case 6: return "REBIND";
+        case 7: return "REPLY";
+        case 8: return "RELEASE";
+        case 9: return "DECLINE";
+        case 10: return "RECONFIGURE";
+        case 11: return "INFORMATION-REQUEST";
+        case 12: return "RELAY-FORW";
+        case 13: return "RELAY-REPL";
+        default: return "UNKNOWN";
+    }
+}
+
+void parse_dhcpv6(const u_char *data, int size, const char *src_ip, const char *dst_ip,
+                  unsigned short src_port, unsigned short dst_port) {
+    if (size < 4) {
+        LOG_WARN_SIMPLE("DHCPv6: Truncated (%d bytes)\n", size);
+        return;
+    }
+    stats_increment("DHCP", (uint32_t)size);
+    uint8_t msg = data[0];
+    unsigned xid = ((unsigned)data[1] << 16) | ((unsigned)data[2] << 8) | data[3];
+    LOG_INFO_SIMPLE("DHCPv6: %s:%u -> %s:%u, Type=%s, XID=0x%06X (%d bytes opts)\n",
+           src_ip, src_port, dst_ip, dst_port,
+           dhcpv6_msg_name(msg), xid, size - 4);
 }

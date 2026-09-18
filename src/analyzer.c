@@ -5,17 +5,25 @@
 #include "sniffer.h"
 #include "logger.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned long long packet_count = 0;
+static int quiet_checked = 0;
+static int quiet = 0;
 
 void analyze_packet(const struct pcap_pkthdr *header, const u_char *pkt_data) {
     packet_count++;
+    if (!quiet_checked) {
+        quiet_checked = 1;
+        const char *q = getenv("SNIFFER_QUIET");
+        if (q && (q[0] == '1' || q[0] == 'y' || q[0] == 'Y')) quiet = 1;
+    }
     int caplen = (int)header->caplen;
-    if (current_log_level >= LOG_DEBUG) {
+    if (!quiet && current_log_level >= LOG_DEBUG) {
         printf("\n[+] Packet #%llu: caplen %d bytes (wire %d bytes, DLT=%d)\n",
                packet_count, caplen, header->len, sniffer_datalink());
-    } else if (packet_count % 1000 == 0) {
+    } else if (!quiet && packet_count % 1000 == 0) {
         printf("[*] Processed %llu packets...\n", packet_count);
     }
     if (caplen <= 0) return;

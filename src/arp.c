@@ -1,6 +1,7 @@
 // ARP packet parsing
 #include "arp.h"
 #include "stats.h"
+#include "security.h"
 #include <stdio.h>
 #include <string.h>
 #ifdef _WIN32
@@ -71,6 +72,7 @@ void parse_arp(const u_char *data, int size) {
     // Display packet info
     printf("ARP: %s\n", op_name);
     printf("     Sender: %s (%s)\n", sender_ip, sender_mac);
+    security_arp(op, sender_ip, sender_mac, target_ip);
 
     if (op == 1) {
         printf("     Target: %s (Broadcast)\n", target_ip);

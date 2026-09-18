@@ -1,0 +1,16 @@
+apiVersion: 1
+datasources:
+  - name: sniffer-postgres
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: ${POSTGRES_DB:snifferdb}
+    user: ${POSTGRES_USER:sniffer}
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD:snifferpass}
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: false
+    isDefault: true
+    editable: false
