@@ -18,7 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Npcap SDK
-        run: choco install npcap-sdk -y
+        run: |
+          $url = "https://nmap.org/npcap/dist/npcap-sdk-1.13.exe"
+          $out = "C:\npcap-sdk-1.13.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Start-Process -FilePath $out -ArgumentList "/S" -Wait
+          $env:NPCAP_SDK = "C:/Program Files/Npcap-sdk"
         shell: powershell
       - name: Configure (MSVC)
         # NOTE: CMake reads $ENV{NPCAP_SDK}; -D flag alone is ineffective.
