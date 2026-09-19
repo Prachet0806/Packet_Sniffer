@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/types.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -17,6 +18,7 @@
 #endif
 #else
 #include <unistd.h>
+#include <time.h>
 #endif
 
 #define QUEUE_MAX 10000

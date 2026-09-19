@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 static unsigned long long packet_count = 0;
 static int quiet_checked = 0;
