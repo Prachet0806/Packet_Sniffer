@@ -2,6 +2,9 @@
 #ifndef DHCP_H
 #define DHCP_H
 
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <pcap.h>
 #include <stdint.h>
 #include <assert.h>

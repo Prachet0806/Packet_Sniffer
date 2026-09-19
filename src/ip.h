@@ -2,6 +2,9 @@
 #ifndef IP_H
 #define IP_H
 
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <pcap.h>
 #ifdef _WIN32
 #include <winsock2.h>
