@@ -1,6 +1,9 @@
 #ifndef HTTPS_H
 #define HTTPS_H
 
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <pcap.h>
 #include <stdint.h>  // for uint16_t
 

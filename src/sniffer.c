@@ -1,4 +1,7 @@
 // Multi-threaded packet sniffer (cross-platform, bounded queue, clean shutdown)
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include "sniffer.h"
 #include "analyzer.h"
 #include "os_compat.h"
@@ -8,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-#include <sys/types.h>
 
 #ifdef _WIN32
 #include <winsock2.h>

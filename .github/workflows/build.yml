@@ -19,16 +19,22 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Npcap SDK
         run: |
-          $url = "https://nmap.org/npcap/dist/npcap-sdk-1.13.exe"
-          $out = "C:\npcap-sdk-1.13.exe"
+          $url = "https://nmap.org/npcap/dist/npcap-sdk-1.16.zip"
+          $out = "$env:TEMP\npcap-sdk-1.16.zip"
           Invoke-WebRequest -Uri $url -OutFile $out
-          Start-Process -FilePath $out -ArgumentList "/S" -Wait
-          $env:NPCAP_SDK = "C:/Program Files/Npcap-sdk"
+          $tmp = "C:\npcap-sdk-tmp"
+          if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+          Expand-Archive -Path $out -DestinationPath $tmp -Force
+          $inc = Get-ChildItem -Path $tmp -Recurse -Filter "pcap.h" | Select-Object -First 1
+          if (-not $inc) { throw "Npcap SDK install failed: pcap.h not found after extraction" }
+          $sdk = $inc.Directory.Parent.FullName
+          "NPCAP_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "NPCAP_SDK=$sdk"
         shell: powershell
       - name: Configure (MSVC)
-        # NOTE: CMake reads $ENV{NPCAP_SDK}; -D flag alone is ineffective.
+        # NOTE: CMake reads $ENV{NPCAP_SDK} (persisted via GITHUB_ENV above).
         run: |
-          $env:NPCAP_SDK = "C:/Program Files/Npcap-sdk"
+          if (-not (Test-Path "$env:NPCAP_SDK\Include\pcap.h")) { throw "NPCAP_SDK not found at $env:NPCAP_SDK" }
           cmake -S . -B build
         shell: powershell
       - name: Build

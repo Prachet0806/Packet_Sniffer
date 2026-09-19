@@ -1,6 +1,9 @@
 #ifndef HTTP_H
 #define HTTP_H
 
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <pcap.h>
 
 // Parse an HTTP payload carried inside TCP

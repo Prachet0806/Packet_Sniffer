@@ -2,6 +2,9 @@
 #ifndef ICMP_H
 #define ICMP_H
 
+#ifndef _WIN32
+#include <sys/types.h>
+#endif
 #include <pcap.h>
 
 #pragma pack(push, 1)
