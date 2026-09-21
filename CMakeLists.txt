@@ -55,12 +55,31 @@ if(WIN32)
     if(DEFINED ENV{NPCAP_SDK})
         target_include_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Include)
         target_link_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH})
+        # Copy Npcap DLLs to build dir for test execution
+        add_custom_command(TARGET sniffer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
+                SRC_DIR "$ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH}"
+                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMENT "Copying Npcap DLLs for test execution"
+        )
     elseif(EXISTS "C:/npcap-sdk/Include")
         target_include_directories(sniffer_lib PUBLIC C:/npcap-sdk/Include)
         target_link_directories(sniffer_lib PUBLIC C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH})
+        add_custom_command(TARGET sniffer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
+                SRC_DIR "C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
+                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMENT "Copying Npcap DLLs for test execution"
+        )
     elseif(EXISTS "C:/Program Files/Npcap-sdk/Include")
         target_include_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Include")
         target_link_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}")
+        add_custom_command(TARGET sniffer POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
+                SRC_DIR "C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
+                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMENT "Copying Npcap DLLs for test execution"
+        )
     endif()
     if(DEFINED ENV{POSTGRES_ROOT})
         target_include_directories(sniffer_lib PUBLIC $ENV{POSTGRES_ROOT}/include)
