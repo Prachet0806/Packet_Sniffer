@@ -31,6 +31,21 @@ jobs:
           "NPCAP_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "NPCAP_SDK=$sdk"
         shell: powershell
+      - name: Install Npcap runtime
+        run: |
+          $ver = "1.88"
+          $url = "https://nmap.org/npcap/dist/npcap-$ver.exe"
+          $out = "$env:TEMP\npcap-$ver.exe"
+          Invoke-WebRequest -Uri $url -OutFile $out
+          Write-Host "Installing Npcap $ver silently..."
+          Start-Process -FilePath $out -ArgumentList "/S", "/winpcap_mode=yes", "/loopback_support=yes" -Wait
+          Start-Sleep -Seconds 15
+          Get-ChildItem "C:\Windows\System32\Npcap\" -ErrorAction SilentlyContinue
+          Get-ChildItem "C:\Windows\System32\wpcap.dll", "C:\Windows\SysWOW64\wpcap.dll" -ErrorAction SilentlyContinue
+          if ((-not (Test-Path "C:\Windows\System32\Npcap\wpcap.dll")) -and (-not (Test-Path "C:\Windows\System32\wpcap.dll"))) { throw "Npcap runtime DLLs not found after install" }
+          "C:\Windows\System32\Npcap" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "Added C:\Windows\System32\Npcap to PATH"
+        shell: powershell
       - name: Configure (MSVC)
         # NOTE: CMake reads $ENV{NPCAP_SDK} (persisted via GITHUB_ENV above).
         run: |
@@ -39,6 +54,20 @@ jobs:
         shell: powershell
       - name: Build
         run: cmake --build build --config Release
+        shell: powershell
+      - name: Stage Npcap DLLs for tests
+        run: |
+          Get-ChildItem build/Release
+          foreach ($dll in @("wpcap.dll", "Packet.dll")) {
+            foreach ($src in @("C:\Windows\System32\Npcap\$dll", "C:\Windows\System32\$dll")) {
+              if (Test-Path $src) {
+                Copy-Item $src build/Release/ -Force
+                Write-Host "Staged $dll from $src"
+                break
+              }
+            }
+          }
+          if (-not (Test-Path "build/Release/wpcap.dll")) { throw "wpcap.dll not staged next to test executables" }
         shell: powershell
       - name: CTest
         run: ctest --test-dir build -C Release --output-on-failure

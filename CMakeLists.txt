@@ -55,29 +55,34 @@ if(WIN32)
     if(DEFINED ENV{NPCAP_SDK})
         target_include_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Include)
         target_link_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH})
-        # Copy Npcap DLLs to build dir for test execution
+        # Stage Npcap runtime DLLs next to the test executables. The SDK lib
+        # dir ships only .lib files; CopyNpcapDLLs.cmake falls back to the
+        # installed runtime locations (C:/Windows/System32/Npcap, ...).
         add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
-                SRC_DIR "$ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH}"
-                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMAND ${CMAKE_COMMAND}
+                "-DNPCAP_SRC_DIR=$ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH}"
+                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
+                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
             COMMENT "Copying Npcap DLLs for test execution"
         )
     elseif(EXISTS "C:/npcap-sdk/Include")
         target_include_directories(sniffer_lib PUBLIC C:/npcap-sdk/Include)
         target_link_directories(sniffer_lib PUBLIC C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH})
         add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
-                SRC_DIR "C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
-                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMAND ${CMAKE_COMMAND}
+                "-DNPCAP_SRC_DIR=C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
+                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
+                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
             COMMENT "Copying Npcap DLLs for test execution"
         )
     elseif(EXISTS "C:/Program Files/Npcap-sdk/Include")
         target_include_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Include")
         target_link_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}")
         add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -DCMAKE_SCRIPT_MODE=ON -P ${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake
-                SRC_DIR "C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
-                DST_DIR $<TARGET_FILE_DIR:sniffer>
+            COMMAND ${CMAKE_COMMAND}
+                "-DNPCAP_SRC_DIR=C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
+                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
+                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
             COMMENT "Copying Npcap DLLs for test execution"
         )
     endif()
@@ -107,6 +112,12 @@ if(WIN32)
         message(WARNING "libpq not found; PostgreSQL support disabled. Set POSTGRES_ROOT.")
     endif()
 else()
+    # glibc with -std=c11 hides BSD types (u_char/u_short/u_int) used by
+    # libpcap unless _DEFAULT_SOURCE is defined, and hides clock_gettime/
+    # nanosleep unless _POSIX_C_SOURCE>=199309L. Define on the command line
+    # so it applies before ANY system header in every TU (per-file #defines
+    # are too late once pcap.h is pulled in transitively).
+    target_compile_definitions(sniffer_lib PUBLIC _DEFAULT_SOURCE _POSIX_C_SOURCE=200809L)
     find_path(PCAP_INCLUDE_DIR pcap.h)
     find_library(PCAP_LIB pcap)
     if(NOT PCAP_LIB)

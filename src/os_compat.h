@@ -17,7 +17,12 @@ static inline void cond_init(cond_t *c) { InitializeConditionVariable(c); }
 static inline void sleep_ms(unsigned ms) { Sleep(ms); }
 static inline int strncasecmp_compat(const char *s1, const char *s2, size_t n) { return _strnicmp(s1, s2, n); }
 #else
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
