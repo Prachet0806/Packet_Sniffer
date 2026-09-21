@@ -31,20 +31,36 @@ jobs:
           "NPCAP_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "NPCAP_SDK=$sdk"
         shell: powershell
-      - name: Install Npcap runtime
+      - name: Fetch Npcap runtime DLLs (no driver install)
+        # NOTE: executing the Npcap installer hangs headless CI (driver
+        # install blocks). Tests only need --help + --read offline replay,
+        # which require just wpcap.dll/Packet.dll, not the kernel driver.
+        # So extract the DLLs from the installer with 7-Zip and stage them
+        # next to the test executables instead of running the installer.
+        timeout-minutes: 5
         run: |
           $ver = "1.88"
           $url = "https://nmap.org/npcap/dist/npcap-$ver.exe"
           $out = "$env:TEMP\npcap-$ver.exe"
           Invoke-WebRequest -Uri $url -OutFile $out
-          Write-Host "Installing Npcap $ver silently..."
-          Start-Process -FilePath $out -ArgumentList "/S", "/winpcap_mode=yes", "/loopback_support=yes" -Wait
-          Start-Sleep -Seconds 15
-          Get-ChildItem "C:\Windows\System32\Npcap\" -ErrorAction SilentlyContinue
-          Get-ChildItem "C:\Windows\System32\wpcap.dll", "C:\Windows\SysWOW64\wpcap.dll" -ErrorAction SilentlyContinue
-          if ((-not (Test-Path "C:\Windows\System32\Npcap\wpcap.dll")) -and (-not (Test-Path "C:\Windows\System32\wpcap.dll"))) { throw "Npcap runtime DLLs not found after install" }
-          "C:\Windows\System32\Npcap" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Write-Host "Added C:\Windows\System32\Npcap to PATH"
+          $extract = "$env:TEMP\npcap-extract"
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
+          & $sevenZip x $out "-o$extract" -y | Select-Object -Last 5
+          Get-ChildItem -Recurse $extract | Where-Object { $_.Name -in @("wpcap.dll", "Packet.dll") } | Select-Object FullName, Length
+          $wpcap = Get-ChildItem -Recurse $extract -Filter "wpcap.dll" | Where-Object { $_.FullName -match "x64|64" } | Select-Object -First 1
+          if (-not $wpcap) { $wpcap = Get-ChildItem -Recurse $extract -Filter "wpcap.dll" | Select-Object -First 1 }
+          $packet = Get-ChildItem -Recurse $extract -Filter "Packet.dll" | Where-Object { $_.FullName -match "x64|64" } | Select-Object -First 1
+          if (-not $packet) { $packet = Get-ChildItem -Recurse $extract -Filter "Packet.dll" | Select-Object -First 1 }
+          if (-not $wpcap) { throw "wpcap.dll not found in extracted Npcap installer" }
+          if (-not $packet) { throw "Packet.dll not found in extracted Npcap installer" }
+          $runtimeDir = Join-Path $extract "runtime-dlls"
+          New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
+          Copy-Item $wpcap.FullName (Join-Path $runtimeDir "wpcap.dll") -Force
+          Copy-Item $packet.FullName (Join-Path $runtimeDir "Packet.dll") -Force
+          "NPCAP_RUNTIME_DIR=$runtimeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Staged runtime DLLs from $($wpcap.FullName) and $($packet.FullName)"
         shell: powershell
       - name: Configure (MSVC)
         # NOTE: CMake reads $ENV{NPCAP_SDK} (persisted via GITHUB_ENV above).
@@ -58,8 +74,12 @@ jobs:
       - name: Stage Npcap DLLs for tests
         run: |
           Get-ChildItem build/Release
+          $candidates = @()
+          if ($env:NPCAP_RUNTIME_DIR) { $candidates += $env:NPCAP_RUNTIME_DIR }
+          $candidates += @("C:\Windows\System32\Npcap", "C:\Windows\System32")
           foreach ($dll in @("wpcap.dll", "Packet.dll")) {
-            foreach ($src in @("C:\Windows\System32\Npcap\$dll", "C:\Windows\System32\$dll")) {
+            foreach ($dir in $candidates) {
+              $src = Join-Path $dir $dll
               if (Test-Path $src) {
                 Copy-Item $src build/Release/ -Force
                 Write-Host "Staged $dll from $src"
