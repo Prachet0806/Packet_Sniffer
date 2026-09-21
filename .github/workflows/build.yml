@@ -49,12 +49,32 @@ jobs:
           if (-not (Test-Path $sevenZip)) { throw "7-Zip not found at $sevenZip" }
           & $sevenZip x $out "-o$extract" -y | Select-Object -Last 5
           Get-ChildItem -Recurse $extract | Where-Object { $_.Name -in @("wpcap.dll", "Packet.dll") } | Select-Object FullName, Length
-          $wpcap = Get-ChildItem -Recurse $extract -Filter "wpcap.dll" | Where-Object { $_.FullName -match "x64|64" } | Select-Object -First 1
-          if (-not $wpcap) { $wpcap = Get-ChildItem -Recurse $extract -Filter "wpcap.dll" | Select-Object -First 1 }
-          $packet = Get-ChildItem -Recurse $extract -Filter "Packet.dll" | Where-Object { $_.FullName -match "x64|64" } | Select-Object -First 1
-          if (-not $packet) { $packet = Get-ChildItem -Recurse $extract -Filter "Packet.dll" | Select-Object -First 1 }
-          if (-not $wpcap) { throw "wpcap.dll not found in extracted Npcap installer" }
-          if (-not $packet) { throw "Packet.dll not found in extracted Npcap installer" }
+          # 0xc000007b = wrong-arch DLL. Runner is x64, so exclude ARM64
+          # ("ARM64" contains "64" — a plain -match "64" misfires) and keep
+          # wpcap.dll + Packet.dll from the SAME directory.
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vsWhere -latest -find "**\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found via vswhere" }
+          function Test-IsX64($path) {
+            $h = & $dumpbin /headers $path 2>&1 | Select-String "machine \(x64\)"
+            return ($null -ne $h)
+          }
+          $wpcapCandidates = Get-ChildItem -Recurse $extract -Filter "wpcap.dll" |
+            Where-Object { $_.FullName -notmatch "(?i)arm" } |
+            Sort-Object { if ($_.FullName -match "(?i)x64") { 0 } else { 1 } }, FullName
+          if (-not $wpcapCandidates) { throw "wpcap.dll not found in extracted Npcap installer" }
+          $wpcap = $null; $packet = $null
+          foreach ($cand in $wpcapCandidates) {
+            if (-not (Test-IsX64 $cand.FullName)) { Write-Host "Skipping non-x64 $($cand.FullName)"; continue }
+            $sib = Join-Path $cand.DirectoryName "Packet.dll"
+            if (-not (Test-Path $sib)) { Write-Host "Skipping $($cand.FullName): no sibling Packet.dll"; continue }
+            if (-not (Test-IsX64 $sib)) { Write-Host "Skipping $($cand.FullName): sibling Packet.dll is not x64"; continue }
+            $wpcap = $cand; $packet = Get-Item $sib; break
+          }
+          if (-not $wpcap) { throw "No x64 wpcap.dll + Packet.dll pair found in extracted installer" }
+          Write-Host "Selected $($wpcap.FullName) + $($packet.FullName)"
+          & $dumpbin /headers $wpcap.FullName 2>&1 | Select-String "machine \("
+          & $dumpbin /headers $packet.FullName 2>&1 | Select-String "machine \("
           $runtimeDir = Join-Path $extract "runtime-dlls"
           New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
           Copy-Item $wpcap.FullName (Join-Path $runtimeDir "wpcap.dll") -Force
@@ -88,6 +108,12 @@ jobs:
             }
           }
           if (-not (Test-Path "build/Release/wpcap.dll")) { throw "wpcap.dll not staged next to test executables" }
+          $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vsWhere -latest -find "**\dumpbin.exe" | Select-Object -First 1
+          & $dumpbin /headers build/Release/sniffer.exe 2>&1 | Select-String "machine \("
+          & $dumpbin /headers build/Release/wpcap.dll 2>&1 | Select-String "machine \("
+          & $dumpbin /headers build/Release/Packet.dll 2>&1 | Select-String "machine \("
+          & $dumpbin /DEPENDENTS build/Release/sniffer.exe 2>&1 | Select-String "wpcap|Packet|libpq"
         shell: powershell
       - name: CTest
         run: ctest --test-dir build -C Release --output-on-failure
