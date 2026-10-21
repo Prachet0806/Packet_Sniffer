@@ -8,54 +8,191 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "Packets/sec by interval (SUM over window)",
-      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "title": "Captured packets/sec",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
       "targets": [
         {
-          "rawSql": "SELECT interval_start AS time, SUM(total_packets) AS \"packets\" FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour' GROUP BY interval_start ORDER BY interval_start",
+          "rawSql": "SELECT interval_start AS time, SUM(total_packets / duration_seconds) AS \"packets\" FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring}) GROUP BY interval_start ORDER BY interval_start",
           "format": "time_series"
         }
       ],
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      }
     },
     {
       "id": 2,
       "type": "timeseries",
-      "title": "Bytes by protocol",
-      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "title": "Protocol-layer bytes per interval (overlapping layers)",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
       "targets": [
         {
-          "rawSql": "SELECT interval_start AS time, SUM(tcp_bytes) AS \"tcp\", SUM(udp_bytes) AS \"udp\", SUM(dns_bytes) AS \"dns\", SUM(http_bytes) AS \"http\", SUM(https_bytes) AS \"https\" FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour' GROUP BY interval_start ORDER BY interval_start",
+          "rawSql": "SELECT interval_start AS time, SUM(tcp_bytes) AS \"tcp\", SUM(udp_bytes) AS \"udp\", SUM(dns_bytes) AS \"dns\", SUM(http_bytes) AS \"http\", SUM(https_bytes) AS \"https\" FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring}) GROUP BY interval_start ORDER BY interval_start",
           "format": "time_series"
         }
       ],
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      }
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "Total packets (1h SUM — Postgres stores interval deltas, JSON is cumulative)",
-      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "title": "Captured packets in selected range",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
       "targets": [
         {
-          "rawSql": "SELECT SUM(total_packets) FROM protocol_stats WHERE interval_start > NOW() - INTERVAL '1 hour'",
+          "rawSql": "SELECT SUM(total_packets) FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring})",
           "format": "table"
         }
       ],
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 8
+      }
     },
     {
       "id": 4,
       "type": "table",
       "title": "Recent alerts",
-      "datasource": {"type": "postgres", "uid": "sniffer-postgres"},
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
       "targets": [
         {
-          "rawSql": "SELECT time, type, src, dst, detail FROM alerts ORDER BY time DESC LIMIT 50",
+          "rawSql": "SELECT time, sensor_id, type, confidence, src, dst, detail FROM alerts_v2 WHERE $__timeFilter(time) ORDER BY time DESC LIMIT 50",
           "format": "table"
         }
       ],
-      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 8}
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 8
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Queue drops",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(queue_drops) FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring})",
+          "format": "table"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Malformed observations",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(malformed) FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring})",
+          "format": "table"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 16
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Recording errors",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(recording_errors) FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring})",
+          "format": "table"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 16
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Alert journal saturation",
+      "datasource": {
+        "type": "postgres",
+        "uid": "sniffer-postgres"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(alert_drops) FROM protocol_stats_v2 WHERE $__timeFilter(interval_start) AND sensor_id IN (${sensor:sqlstring})",
+          "format": "table"
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 16
+      }
     }
-  ]
+  ],
+  "refresh": "5s",
+  "templating": {
+    "list": [
+      {
+        "name": "sensor",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "sniffer-postgres"
+        },
+        "query": "SELECT DISTINCT sensor_id FROM protocol_stats_v2 ORDER BY sensor_id",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  }
 }

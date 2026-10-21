@@ -16,8 +16,8 @@
 #pragma pack(push, 1)
 // ICMPv4 header
 typedef struct {
-    u_char  type;
-    u_char  code;
+    u_char type;
+    u_char code;
     u_short checksum;
     u_short id;
     u_short seq;
@@ -25,12 +25,11 @@ typedef struct {
 
 // ICMPv6 header
 typedef struct {
-    u_char  type;
-    u_char  code;
+    u_char type;
+    u_char code;
     u_short checksum;
 } icmpv6_header_t;
 #pragma pack(pop)
-
 
 // API
 void parse_icmp(const u_char *data, int size);

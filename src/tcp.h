@@ -17,10 +17,10 @@
 typedef struct {
     u_short src_port;
     u_short dst_port;
-    u_int   seq_num;
-    u_int   ack_num;
-    u_char  data_offset_reserved;
-    u_char  flags;
+    u_int seq_num;
+    u_int ack_num;
+    u_char data_offset_reserved;
+    u_char flags;
     u_short window;
     u_short checksum;
     u_short urgent_ptr;

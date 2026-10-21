@@ -1,3 +1,4 @@
+#include "logger.h"
 #include "udp.h"
 #include "dns.h"
 #include "dhcp.h"
@@ -13,25 +14,32 @@
 
 void parse_udp(const u_char *data, int size, const char *src_ip, const char *dst_ip) {
     if (size < (int)sizeof(udp_header_t)) {
-        printf("UDP: Truncated header\n");
+        stats_note("truncated");
+        LOG_DEBUG_SIMPLE("UDP: Truncated header\n");
         return;
     }
 
     udp_header_t udp;
     memcpy(&udp, data, sizeof(udp));
     int ulen = ntohs(udp.len); // header + payload
-    if (ulen < (int)sizeof(udp_header_t) || ulen > size) {
-        printf("UDP: Invalid length field (%d), available=%d; using available\n", ulen, size);
+    if (ulen < (int)sizeof(udp_header_t)) {
+        stats_note("malformed");
+        return;
+    }
+    if (ulen > size) {
+        stats_note("truncated");
+        stats_note("malformed");
+        LOG_DEBUG_SIMPLE("UDP: Invalid length field (%d), available=%d; using available\n", ulen,
+                         size);
         ulen = size;
     }
 
-    stats_increment("UDP", (uint32_t)size);
+    stats_increment("UDP", (uint32_t)ulen);
 
     u_short src_port = ntohs(udp.src_port);
     u_short dst_port = ntohs(udp.dst_port);
 
-    printf("UDP: %s:%u -> %s:%u, Len=%d\n",
-           src_ip, src_port, dst_ip, dst_port, ulen);
+    LOG_DEBUG_SIMPLE("UDP: %s:%u -> %s:%u, Len=%d\n", src_ip, src_port, dst_ip, dst_port, ulen);
 
     // DNS on port 53 (also mDNS 5353 carries DNS-like payloads)
     if (src_port == 53 || dst_port == 53 || src_port == 5353 || dst_port == 5353) {

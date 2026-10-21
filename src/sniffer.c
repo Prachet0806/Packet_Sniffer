@@ -1,508 +1,542 @@
-// Multi-threaded packet sniffer (cross-platform, bounded queue, clean shutdown)
-#ifndef _WIN32
-#ifndef _DEFAULT_SOURCE
-#define _DEFAULT_SOURCE
-#endif
-#ifndef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#endif
-#include <sys/types.h>
-#include <time.h>
-#endif
 #include "sniffer.h"
 #include "analyzer.h"
-#include "os_compat.h"
 #include "stats.h"
+#include "security.h"
+#include "logger.h"
+#include "util.h"
+#include "stream.h"
 #include <pcap.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
-
 #ifdef _WIN32
-#include <winsock2.h>
-#include <iphlpapi.h>
-#ifdef _MSC_VER
-#pragma comment(lib, "iphlpapi.lib")
-#endif
+#include <io.h>
 #else
 #include <unistd.h>
 #endif
-
 #define QUEUE_MAX 10000
-
-// Thread-safe queue
-typedef struct PacketNode {
-    struct pcap_pkthdr *header;
-    u_char *data;
-    struct PacketNode *next;
-} PacketNode;
-
-typedef struct {
-    PacketNode *head;
-    PacketNode *tail;
-    mutex_t cs;
-    cond_t cv;
-    int count;
-    int dropped;
-    int shutdown;
-} PacketQueue;
-
-static PacketQueue queue;
-static pcap_t *g_handle = NULL;
-static int g_stop = 0;
-static mutex_t g_stop_mutex;
-static int g_verbose = 0;
-static int g_dlt = DLT_EN10MB;
-static int g_offline = 0;
-
-static inline int get_g_stop(void) {
-    int val;
-    mutex_lock(&g_stop_mutex);
-    val = g_stop;
-    mutex_unlock(&g_stop_mutex);
-    return val;
-}
-
-static inline void set_g_stop(int val) {
-    mutex_lock(&g_stop_mutex);
-    g_stop = val;
-    mutex_unlock(&g_stop_mutex);
-}
-
-int sniffer_datalink(void) { return g_dlt; }
-int sniffer_is_offline(void) { return g_offline; }
-int sniffer_apply_filter(const char *bpf) {
-    if (!bpf || !bpf[0]) return -1;
-    if (g_offline || !g_handle) return -2; // live only
-    struct bpf_program fp;
-    if (pcap_compile(g_handle, &fp, bpf, 1, PCAP_NETMASK_UNKNOWN) == -1) return -1;
-    int rc = pcap_setfilter(g_handle, &fp);
-    pcap_freecode(&fp);
-    return rc;
-}
-
-void queue_init(PacketQueue *q) {
-    q->head = q->tail = NULL;
-    q->count = 0;
-    q->dropped = 0;
-    q->shutdown = 0;
-    mutex_init(&q->cs);
-    cond_init(&q->cv);
-    mutex_init(&g_stop_mutex);
-    set_g_stop(0);
-}
-
-void queue_shutdown(PacketQueue *q) {
-    mutex_lock(&q->cs);
-    q->shutdown = 1;
-#ifdef _WIN32
-    WakeAllConditionVariable(&q->cv);
+static atomic_flag_t stop_flag;
+static mutex_t control_cs;
+static int control_ready, dlt = DLT_EN10MB, offline, running;
+static char lifecycle[24] = "initializing", command[512];
+static int command_pending, command_result;
+static uint64_t last_packet, queue_bytes, queue_limit = 64 * 1024 * 1024;
+static int queue_count;
+#ifndef _WIN32
+static volatile sig_atomic_t signal_stop;
+static struct sigaction old_int, old_term;
 #else
-    pthread_cond_broadcast(&q->cv);
-#endif
-    mutex_unlock(&q->cs);
-}
-
-void queue_destroy(PacketQueue *q) {
-    mutex_lock(&q->cs);
-    PacketNode *n = q->head;
-    q->head = q->tail = NULL;
-    q->count = 0;
-    mutex_unlock(&q->cs);
-    while (n) {
-        PacketNode *nx = n->next;
-        free(n->header);
-        free(n->data);
-        free(n);
-        n = nx;
-    }
-    mutex_destroy(&q->cs);
-}
-
-// Returns 0 on success, -1 if dropped (full / alloc fail / shutting down)
-int queue_push(PacketQueue *q, const struct pcap_pkthdr *header, const u_char *data) {
-    if (get_g_stop() || q->shutdown) return -1;
-    // Use caplen (actually captured), never len (wire length)
-    bpf_u_int32 caplen = header->caplen;
-    if (caplen == 0) return -1;
-    if (caplen > 262144) caplen = 262144; // sanity cap
-
-    PacketNode *node = (PacketNode *)malloc(sizeof(PacketNode));
-    if (!node) return -1;
-    node->header = (struct pcap_pkthdr *)malloc(sizeof(struct pcap_pkthdr));
-    if (!node->header) { free(node); return -1; }
-    memcpy(node->header, header, sizeof(struct pcap_pkthdr));
-    node->header->caplen = caplen;
-    // Clamp len display to caplen if snaplen truncated
-    node->data = (u_char *)malloc(caplen ? caplen : 1);
-    if (!node->data) { free(node->header); free(node); return -1; }
-    memcpy(node->data, data, caplen);
-    node->next = NULL;
-
-    mutex_lock(&q->cs);
-    if (q->shutdown || q->count >= QUEUE_MAX) {
-        q->dropped++;
-        mutex_unlock(&q->cs);
-        free(node->header);
-        free(node->data);
-        free(node);
-        return -1;
-    }
-    if (q->tail) q->tail->next = node;
-    else q->head = node;
-    q->tail = node;
-    q->count++;
-    int c = q->count;
-    mutex_unlock(&q->cs);
-#ifdef _WIN32
-    WakeConditionVariable(&q->cv);
-#else
-    pthread_cond_signal(&q->cv);
-#endif
-    if (g_verbose) printf("[Queue] pushed, size=%d\n", c);
-    return 0;
-}
-
-PacketNode* queue_pop(PacketQueue *q) {
-    mutex_lock(&q->cs);
-    for (;;) {
-        if (q->head) break;
-        if (q->shutdown || get_g_stop()) { mutex_unlock(&q->cs); return NULL; }
-#ifdef _WIN32
-        SleepConditionVariableCS(&q->cv, &q->cs, 500);
-#else
-        struct timespec ts;
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 500 * 1000000L;
-        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-        pthread_cond_timedwait(&q->cv, &q->cs, &ts);
-#endif
-    }
-    PacketNode *node = q->head;
-    q->head = node->next;
-    if (!q->head) q->tail = NULL;
-    q->count--;
-    int c = q->count;
-    mutex_unlock(&q->cs);
-    if (g_verbose) printf("[Queue] popped, size=%d\n", c);
-    return node;
-}
-
-// MAC helper (Windows only; POSIX prints Unknown)
-static void print_mac(const char *guid) {
-#ifdef _WIN32
-    ULONG buflen = 0;
-    ULONG flags = GAA_FLAG_INCLUDE_PREFIX;
-    // First call to get required buffer size
-    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, NULL, &buflen) != ERROR_BUFFER_OVERFLOW) {
-        printf(" (MAC: Unknown)");
-        return;
-    }
-    IP_ADAPTER_ADDRESSES *info = (IP_ADAPTER_ADDRESSES *)malloc(buflen);
-    if (!info) { printf(" (MAC: Unknown)"); return; }
-    if (GetAdaptersAddresses(AF_UNSPEC, flags, NULL, info, &buflen) != ERROR_SUCCESS) {
-        printf(" (MAC: Unknown)");
-        free(info);
-        return;
-    }
-    for (IP_ADAPTER_ADDRESSES *p = info; p; p = p->Next) {
-        // guid looks like \Device\NPF_{GUID}; AdapterName is {GUID}
-        // Convert adapter name to GUID format for comparison
-        char adapter_guid[256];
-        int guid_len = snprintf(adapter_guid, sizeof(adapter_guid), "{%S}", p->AdapterName);
-        if (guid_len > 0 && strstr(guid, adapter_guid)) {
-            if (p->PhysicalAddressLength == 6) {
-                printf(" (MAC: %02X:%02X:%02X:%02X:%02X:%02X)",
-                       p->PhysicalAddress[0], p->PhysicalAddress[1], p->PhysicalAddress[2],
-                       p->PhysicalAddress[3], p->PhysicalAddress[4], p->PhysicalAddress[5]);
-            } else {
-                printf(" (MAC: Unknown)");
-            }
-            free(info);
-            return;
-        }
-    }
-    free(info);
-    printf(" (MAC: Unknown)");
-#else
-    (void)guid;
-    printf(" (MAC: n/a)");
-#endif
-}
-
-// Packet capture handler (user cookie = pcap_dumper_t* or NULL)
-static void packet_handler(u_char *param, const struct pcap_pkthdr *header, const u_char *pkt_data) {
-    if (get_g_stop()) return;
-    if (g_verbose) printf("[Capture] caplen=%u len=%u\n", header->caplen, header->len);
-    if (param) pcap_dump(param, header, pkt_data);
-    if (queue_push(&queue, header, pkt_data) != 0 && g_verbose)
-        printf("[Capture] packet dropped (queue full/alloc fail)\n");
-}
-
-// Analysis thread
-#ifdef _WIN32
-static DWORD WINAPI analysis_thread(LPVOID param) {
-    (void)param;
-    for (;;) {
-        PacketNode *node = queue_pop(&queue);
-        if (!node) break; // shutdown
-        analyze_packet(node->header, node->data);
-        free(node->header);
-        free(node->data);
-        free(node);
-    }
-    return 0;
-}
-#else
-static void *analysis_thread(void *param) {
-    (void)param;
-    for (;;) {
-        PacketNode *node = queue_pop(&queue);
-        if (!node) break;
-        analyze_packet(node->header, node->data);
-        free(node->header);
-        free(node->data);
-        free(node);
-    }
-    return NULL;
-}
-#endif
-
-static void request_stop(void) {
-    set_g_stop(1);
-    queue_shutdown(&queue);
-    if (g_handle) pcap_breakloop(g_handle);
-}
-
-#ifdef _WIN32
-static BOOL WINAPI console_handler(DWORD ev) {
-    if (ev == CTRL_C_EVENT || ev == CTRL_CLOSE_EVENT || ev == CTRL_BREAK_EVENT || 
-        ev == CTRL_LOGOFF_EVENT || ev == CTRL_SHUTDOWN_EVENT) { 
-        request_stop(); return TRUE; 
+static BOOL WINAPI console_handler(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT || event == CTRL_CLOSE_EVENT) {
+        flag_set(&stop_flag, 1);
+        return TRUE;
     }
     return FALSE;
 }
-#else
-static void sigint_handler(int sig) { (void)sig; request_stop(); }
-static void sigterm_handler(int sig) { (void)sig; request_stop(); }
 #endif
-
-static int pick_device(pcap_if_t *alldevs, int n, int wanted) {
-    (void)alldevs;
-    if (wanted >= 1 && wanted <= n) return wanted;
-    return -1;
+/* Capture alone owns pcap and services commands between nonblocking reads. */
+typedef struct Packet {
+    struct Packet *next;
+    struct pcap_pkthdr header;
+    unsigned char data[1];
+} Packet;
+static Packet *head, *tail;
+static mutex_t queue_cs;
+static int queue_shutdown;
+int sniffer_init(void) {
+    if (control_ready)
+        return -1;
+    mutex_init(&control_cs);
+    control_ready = 1;
+    const char *rp = getenv("SNIFFER_READ");
+    offline = rp && *rp;
+    flag_set(&stop_flag, 0);
+    return 0;
 }
-
-// Sniffer (keeps old signature; env vars allow non-interactive/Docker use)
-void start_sniffer() {
-    const char *env_v = getenv("SNIFFER_VERBOSE");
-    if (env_v && env_v[0] == '1') g_verbose = 1;
-    const char *env_iface = getenv("SNIFFER_IFACE"); // 1-based index or name substring
-    const char *env_filter = getenv("SNIFFER_FILTER");
-    const char *read_path = getenv("SNIFFER_READ"); // offline replay input
-    const char *write_path = getenv("SNIFFER_WRITE");
-    int is_offline = (read_path && read_path[0]) ? 1 : 0;
-
-    char errbuf[PCAP_ERRBUF_SIZE] = {0};
-    pcap_t *adhandle = NULL;
-    char devname[512] = {0};
-    mutex_init(&g_stop_mutex);
-    set_g_stop(0);
-
-    // Capture options (live only; ignored in --read mode)
-    int snaplen = 65536;
-    int promisc = 1;
-    int timeout_ms = 1000;
-    const char *e;
-    if ((e = getenv("SNIFFER_SNAPLEN")) && atoi(e) >= 68 && atoi(e) <= 262144)
-        snaplen = atoi(e);
-    if ((e = getenv("SNIFFER_PROMISC")) && (e[0] == '0' || e[0] == 'n' || e[0] == 'N'))
-        promisc = 0;
-    if ((e = getenv("SNIFFER_TIMEOUT_MS")) && atoi(e) >= 10 && atoi(e) <= 60000)
-        timeout_ms = atoi(e);
-
-if (is_offline) {
-        if (env_iface && env_iface[0])
-            fprintf(stderr, "[*] SNIFFER_READ set; ignoring SNIFFER_IFACE='%s'.\n", env_iface);
-        if (write_path && write_path[0])
-            fprintf(stderr, "[*] SNIFFER_READ set; ignoring SNIFFER_WRITE (use live capture to record).\n");
-        adhandle = pcap_open_offline(read_path, errbuf);
-        if (!adhandle) {
-            fprintf(stderr, "Unable to open pcap file '%s': %s\n", read_path, errbuf);
-            return;
+void sniffer_cleanup(void) {
+    if (control_ready) {
+        mutex_destroy(&control_cs);
+        control_ready = 0;
+    }
+}
+int sniffer_datalink(void) { return dlt; }
+int sniffer_is_offline(void) {
+    if (!control_ready)
+        return 0;
+    mutex_lock(&control_cs);
+    int v = offline;
+    mutex_unlock(&control_cs);
+    return v;
+}
+void sniffer_request_stop(void) { flag_set(&stop_flag, 1); }
+static int stopped(void) {
+#ifndef _WIN32
+    if (signal_stop)
+        return 1;
+#endif
+    return flag_get(&stop_flag);
+}
+int sniffer_apply_filter(const char *bpf) {
+    if (!control_ready || !bpf || !*bpf || strlen(bpf) >= sizeof(command))
+        return -1;
+    mutex_lock(&control_cs);
+    if (!running || offline || command_pending) {
+        mutex_unlock(&control_cs);
+        return -2;
+    }
+    strcpy(command, bpf);
+    command_pending = 1;
+    mutex_unlock(&control_cs);
+    uint64_t end = monotonic_ms() + 1500;
+    while (monotonic_ms() < end) {
+        sleep_ms(5);
+        mutex_lock(&control_cs);
+        int pending = command_pending, rc = command_result;
+        mutex_unlock(&control_cs);
+        if (!pending)
+            return rc;
+    }
+    /* The buffer remains owned by capture; timeout never frees command storage. */
+    return -3;
+}
+int sniffer_health_json(char *out, int size) {
+    if (!control_ready)
+        return snprintf(out, (size_t)size, "{\"state\":\"uninitialized\"}");
+    mutex_lock(&control_cs);
+    int n = snprintf(out, (size_t)size,
+                     "{\"state\":\"%s\",\"running\":%s,\"offline\":%s,\"last_packet_monotonic_ms\":"
+                     "%llu,\"queue_packets\":%d,\"queue_bytes\":%llu}",
+                     lifecycle, running ? "true" : "false", offline ? "true" : "false",
+                     (unsigned long long)last_packet, queue_count, (unsigned long long)queue_bytes);
+    mutex_unlock(&control_cs);
+    return n;
+}
+static void state(const char *s, int active) {
+    mutex_lock(&control_cs);
+    snprintf(lifecycle, sizeof(lifecycle), "%s", s);
+    running = active;
+    if (!active) {
+        command_result = -2;
+        command_pending = 0;
+    }
+    mutex_unlock(&control_cs);
+}
+static int set_filter(pcap_t *h, const char *bpf) {
+    struct bpf_program fp = {0};
+    if (pcap_compile(h, &fp, bpf, 1, PCAP_NETMASK_UNKNOWN) < 0)
+        return -1;
+    int rc = pcap_setfilter(h, &fp);
+    pcap_freecode(&fp);
+    return rc;
+}
+static void service_command(pcap_t *h) {
+    char bpf[512];
+    mutex_lock(&control_cs);
+    int pending = command_pending;
+    if (pending)
+        strcpy(bpf, command);
+    mutex_unlock(&control_cs);
+    if (pending) {
+        int rc = set_filter(h, bpf);
+        mutex_lock(&control_cs);
+        command_result = rc;
+        command_pending = 0;
+        mutex_unlock(&control_cs);
+    }
+}
+#ifndef _WIN32
+static void signal_handler(int sig) {
+    (void)sig;
+    signal_stop = 1;
+}
+#endif
+static int enqueue(const struct pcap_pkthdr *h, const unsigned char *data) {
+    if (h->caplen > 262144) {
+        stats_note("unsupported");
+        stats_note("queue_drops");
+        return -1;
+    }
+    size_t bytes = sizeof(Packet) + (h->caplen ? h->caplen - 1 : 0);
+    for (;;) {
+        mutex_lock(&queue_cs);
+        mutex_lock(&control_cs);
+        int full = queue_count >= QUEUE_MAX || queue_bytes + bytes > queue_limit;
+        if (!full) {
+            queue_count++;
+            queue_bytes += bytes;
         }
-        snprintf(devname, sizeof(devname), "%s", read_path);
+        mutex_unlock(&control_cs);
+        mutex_unlock(&queue_cs);
+        if (!full)
+            break;
+        if (!offline || stopped()) {
+            stats_note("queue_drops");
+            return -1;
+        }
+        sleep_ms(1);
+    }
+    Packet *p = malloc(bytes);
+    if (!p) {
+        mutex_lock(&control_cs);
+        queue_count--;
+        queue_bytes -= bytes;
+        mutex_unlock(&control_cs);
+        stats_note("allocation_drops");
+        return -1;
+    }
+    p->header = *h;
+    p->next = NULL;
+    if (h->caplen)
+        memcpy(p->data, data, h->caplen);
+    mutex_lock(&queue_cs);
+    if (tail)
+        tail->next = p;
+    else
+        head = p;
+    tail = p;
+    mutex_unlock(&queue_cs);
+    return 0;
+}
+/* Recording has its own bounded queue so disk latency never blocks capture. */
+static Packet *record_head, *record_tail;
+static uint64_t record_bytes;
+static int record_shutdown, record_started;
+static thread_t record_thread;
+static pcap_dumper_t *record_dumper;
+static atomic_flag_t record_failed, record_discard;
+static void record_enqueue(const struct pcap_pkthdr *h, const u_char *data) {
+    size_t bytes = sizeof(Packet) + (h->caplen ? h->caplen - 1 : 0);
+    mutex_lock(&queue_cs);
+    if (h->caplen > 262144 || record_bytes + bytes > 32 * 1024 * 1024) {
+        mutex_unlock(&queue_cs);
+        stats_note("recording_errors");
+        return;
+    }
+    record_bytes += bytes;
+    mutex_unlock(&queue_cs);
+    Packet *p = malloc(bytes);
+    if (!p) {
+        mutex_lock(&queue_cs);
+        record_bytes -= bytes;
+        mutex_unlock(&queue_cs);
+        stats_note("recording_errors");
+        return;
+    }
+    p->header = *h;
+    p->next = NULL;
+    if (h->caplen)
+        memcpy(p->data, data, h->caplen);
+    mutex_lock(&queue_cs);
+    if (record_tail)
+        record_tail->next = p;
+    else
+        record_head = p;
+    record_tail = p;
+    mutex_unlock(&queue_cs);
+}
+#ifdef _WIN32
+static DWORD WINAPI recording_thread(LPVOID unused) {
+#else
+static void *recording_thread(void *unused) {
+#endif
+    (void)unused;
+    for (;;) {
+        mutex_lock(&queue_cs);
+        Packet *p = record_head;
+        int done = record_shutdown;
+        if (p) {
+            record_head = p->next;
+            if (!record_head)
+                record_tail = NULL;
+            record_bytes -= sizeof(*p) + (p->header.caplen ? p->header.caplen - 1 : 0);
+        }
+        mutex_unlock(&queue_cs);
+        if (!p) {
+            if (done)
+                break;
+            sleep_ms(1);
+            continue;
+        }
+        if (flag_get(&record_failed) || flag_get(&record_discard))
+            stats_note("recording_errors");
+        else {
+            pcap_dump((u_char *)record_dumper, &p->header, p->data);
+            if (pcap_dump_flush(record_dumper)) {
+                stats_note("recording_errors");
+                flag_set(&record_failed, 1);
+                sniffer_request_stop();
+            }
+        }
+        free(p);
+    }
+    return 0;
+}
+static void record_join(void) {
+    if (!record_started)
+        return;
+    mutex_lock(&queue_cs);
+    record_shutdown = 1;
+    mutex_unlock(&queue_cs);
+#ifdef _WIN32
+    if (WaitForSingleObject(record_thread, 5000) == WAIT_TIMEOUT) {
+        flag_set(&record_discard, 1);
+        flag_set(&record_failed, 1);
+        CancelSynchronousIo(record_thread);
+    }
+    WaitForSingleObject(record_thread, INFINITE);
+    CloseHandle(record_thread);
+#else
+    pthread_join(record_thread, NULL);
+#endif
+    record_started = 0;
+}
+#ifdef _WIN32
+static DWORD WINAPI analysis_thread(LPVOID unused) {
+#else
+static void *analysis_thread(void *unused) {
+#endif
+    (void)unused;
+    for (;;) {
+        mutex_lock(&queue_cs);
+        Packet *p = head;
+        int done = queue_shutdown;
+        if (p) {
+            head = p->next;
+            if (!head)
+                tail = NULL;
+        }
+        mutex_unlock(&queue_cs);
+        if (!p) {
+            if (done)
+                break;
+            sleep_ms(1);
+            continue;
+        }
+        analyze_packet(&p->header, p->data);
+        mutex_lock(&control_cs);
+        queue_count--;
+        queue_bytes -= sizeof(*p) + (p->header.caplen ? p->header.caplen - 1 : 0);
+        mutex_unlock(&control_cs);
+        free(p);
+    }
+    stream_cleanup();
+    return 0;
+}
+static pcap_t *open_capture(char *err) {
+    const char *rp = getenv("SNIFFER_READ");
+    if (offline)
+        return pcap_open_offline(rp, err);
+    pcap_if_t *all = NULL;
+    if (pcap_findalldevs(&all, err))
+        return NULL;
+    const char *iface = getenv("SNIFFER_IFACE");
+    pcap_if_t *chosen = NULL;
+    long index;
+    int i = 0, matches = 0;
+    if (iface) {
+        int numeric = parse_integer(iface, 1, 100000, &index) == 0;
+        if (!numeric && strspn(iface, "0123456789") == strlen(iface)) {
+            snprintf(err, PCAP_ERRBUF_SIZE, "Invalid interface index");
+            pcap_freealldevs(all);
+            return NULL;
+        }
+        for (pcap_if_t *d = all; d; d = d->next) {
+            i++;
+            if (!numeric && !strcmp(d->name, iface)) {
+                chosen = d;
+                matches = 1;
+                break;
+            }
+            if ((numeric && i == index) ||
+                (!numeric &&
+                 (strstr(d->name, iface) || (d->description && strstr(d->description, iface))))) {
+                chosen = d;
+                matches++;
+            }
+        }
     } else {
-    pcap_if_t *alldevs = NULL, *d;
-    int i = 0;
-
-    if (pcap_findalldevs(&alldevs, errbuf) == -1) {
-        fprintf(stderr, "Error finding devices: %s\n", errbuf);
-        return;
-    }
-
-    printf("\n=== Available Devices ===\n");
-    for (d = alldevs; d; d = d->next) {
-        printf("%d. %s", ++i, d->name);
-        if (d->description) printf(" - %s", d->description);
-        print_mac(d->name);
-        printf("\n");
-    }
-
-    if (i == 0) {
-        printf("No interfaces found.\n");
-        pcap_freealldevs(alldevs);
-        return;
-    }
-
-    int dev_num = -1;
-    if (env_iface) {
-        // numeric or substring match
-        char *end = NULL;
-        long v = strtol(env_iface, &end, 10);
-        if (end != env_iface && *end == '\0') {
-            dev_num = pick_device(alldevs, i, (int)v);
-        } else {
-            int idx = 1;
-            for (d = alldevs; d; d = d->next, idx++) {
-                if (strstr(d->name, env_iface) ||
-                    (d->description && strstr(d->description, env_iface))) {
-                    dev_num = idx;
-                    break;
+#ifdef _WIN32
+        int interactive = _isatty(_fileno(stdin));
+#else
+        int interactive = isatty(fileno(stdin));
+#endif
+        if (interactive) {
+            for (pcap_if_t *d = all; d; d = d->next)
+                printf("%d. %s\n", ++i, d->name);
+            char b[32];
+            printf("Interface number: ");
+            if (fgets(b, sizeof(b), stdin)) {
+                b[strcspn(b, "\r\n")] = 0;
+                if (!parse_integer(b, 1, i, &index)) {
+                    i = 0;
+                    for (pcap_if_t *d = all; d; d = d->next)
+                        if (++i == index) {
+                            chosen = d;
+                            matches = 1;
+                        }
                 }
             }
         }
-        if (dev_num < 0) {
-            fprintf(stderr, "SNIFFER_IFACE='%s' did not match any device.\n", env_iface);
-            pcap_freealldevs(alldevs);
-            return;
+    }
+    if (!chosen || matches != 1) {
+        snprintf(err, PCAP_ERRBUF_SIZE,
+                 "Interface missing or ambiguous; pass --iface with an exact name/index");
+        pcap_freealldevs(all);
+        return NULL;
+    }
+    long snap, timeout, promisc;
+    if (env_integer("SNIFFER_SNAPLEN", 65536, 68, 262144, &snap) ||
+        env_integer("SNIFFER_TIMEOUT_MS", 1000, 10, 60000, &timeout) ||
+        env_integer("SNIFFER_PROMISC", 1, 0, 1, &promisc)) {
+        pcap_freealldevs(all);
+        return NULL;
+    }
+    pcap_t *h = pcap_open_live(chosen->name, (int)snap, (int)promisc, (int)timeout, err);
+    pcap_freealldevs(all);
+    if (h && pcap_setnonblock(h, 1, err)) {
+        pcap_close(h);
+        return NULL;
+    }
+    return h;
+}
+int start_sniffer(void) {
+    if (!control_ready)
+        return 1;
+    char err[PCAP_ERRBUF_SIZE] = {0};
+    pcap_t *h = open_capture(err);
+    if (!h) {
+        LOG_ERROR_MSG("Capture open failed: %s\n", err);
+        state("failed", 0);
+        return 1;
+    }
+    dlt = pcap_datalink(h);
+    int rc = 0;
+    pcap_dumper_t *dump = NULL;
+    const char *filter = getenv("SNIFFER_FILTER"), *write = getenv("SNIFFER_WRITE");
+    if (filter && *filter && set_filter(h, filter)) {
+        LOG_ERROR_MSG("Filter rejected: %s\n", pcap_geterr(h));
+        pcap_close(h);
+        state("failed", 0);
+        return 1;
+    }
+    if (write && *write) {
+        dump = pcap_dump_open(h, write);
+        if (!dump) {
+            LOG_ERROR_MSG("Cannot create recording\n");
+            pcap_close(h);
+            state("failed", 0);
+            return 1;
         }
-        printf("Using device %d via SNIFFER_IFACE.\n", dev_num);
-    } else {
+    }
+    long limit;
+    if (env_integer("SNIFFER_QUEUE_BYTES", 64 * 1024 * 1024, 262144, 1024 * 1024 * 1024, &limit)) {
+        if (dump)
+            pcap_dump_close(dump);
+        pcap_close(h);
+        return 1;
+    }
+    queue_limit = (uint64_t)limit;
+    mutex_init(&queue_cs);
+    queue_shutdown = 0;
+    head = tail = NULL;
+    queue_count = 0;
+    queue_bytes = 0;
+    record_head = record_tail = NULL;
+    record_bytes = 0;
+    record_shutdown = 0;
+    record_started = 0;
+    record_dumper = dump;
+    flag_set(&record_failed, 0);
+    flag_set(&record_discard, 0);
+    if (dump) {
 #ifdef _WIN32
-        if (!GetConsoleWindow()) {
-            fprintf(stderr, "No SNIFFER_IFACE set and no console for prompt. Set SNIFFER_IFACE.\n");
-            pcap_freealldevs(alldevs);
-            return;
+        record_thread = CreateThread(NULL, 0, recording_thread, NULL, 0, NULL);
+        if (!record_thread) {
+            rc = 1;
+            goto no_thread;
+        }
+#else
+        if (pthread_create(&record_thread, NULL, recording_thread, NULL)) {
+            rc = 1;
+            goto no_thread;
         }
 #endif
-        printf("\nEnter device number to capture: ");
-        fflush(stdout);
-        if (scanf("%d", &dev_num) != 1) {
-            fprintf(stderr, "Invalid input.\n");
-            pcap_freealldevs(alldevs);
-            return;
-        }
+        record_started = 1;
     }
-
-    if (dev_num < 1 || dev_num > i) {
-        printf("Invalid device %d (valid 1..%d).\n", dev_num, i);
-        pcap_freealldevs(alldevs);
-        return;
-    }
-
-    d = alldevs;
-    for (i = 1; i < dev_num && d; d = d->next, i++) {}
-    if (!d) {
-        printf("Invalid device.\n");
-        pcap_freealldevs(alldevs);
-        return;
-    }
-
-    snprintf(devname, sizeof(devname), "%s", d->name);
-
-    adhandle = pcap_open_live(devname, snaplen, promisc, timeout_ms, errbuf);
-    if (!adhandle) {
-        fprintf(stderr, "Unable to open adapter: %s\n", errbuf);
-        pcap_freealldevs(alldevs);
-        return;
-    }
-    pcap_freealldevs(alldevs);
-    } // end live-device branch
-
-    g_offline = is_offline;
-    g_handle = adhandle;
-    g_dlt = pcap_datalink(adhandle);
-
-    // Optional BPF filter
-    if (env_filter && env_filter[0]) {
-        struct bpf_program fp;
-        if (pcap_compile(adhandle, &fp, env_filter, 1, PCAP_NETMASK_UNKNOWN) == -1) {
-            fprintf(stderr, "Bad filter '%s': %s\n", env_filter, pcap_geterr(adhandle));
-        } else if (pcap_setfilter(adhandle, &fp) == -1) {
-            fprintf(stderr, "Could not set filter: %s\n", pcap_geterr(adhandle));
-        } else {
-            printf("BPF filter: %s\n", env_filter);
-        }
-        pcap_freecode(&fp);
-    }
-
-    printf("Listening on %s (DLT=%d%s)... Press Ctrl+C to stop.\n",
-           devname, g_dlt,
-           is_offline ? ", offline replay" : "");
-
-    pcap_dumper_t *dumper = NULL;
-    if (!is_offline && write_path && write_path[0]) {
-        dumper = pcap_dump_open(adhandle, write_path);
-        if (!dumper) {
-            fprintf(stderr, "Could not open %s for writing: %s\n",
-                    write_path, pcap_geterr(adhandle));
-        } else {
-            printf("Recording capture to %s\n", write_path);
-        }
-    }
-
+    thread_t thread;
 #ifdef _WIN32
+    thread = CreateThread(NULL, 0, analysis_thread, NULL, 0, NULL);
+    if (!thread) {
+        rc = 1;
+        goto no_thread;
+    }
     SetConsoleCtrlHandler(console_handler, TRUE);
 #else
-    signal(SIGINT, sigint_handler);
-    signal(SIGTERM, sigterm_handler);
+    if (pthread_create(&thread, NULL, analysis_thread, NULL)) {
+        rc = 1;
+        goto no_thread;
+    }
+    signal_stop = 0;
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = signal_handler;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, &old_int);
+    sigaction(SIGTERM, &action, &old_term);
 #endif
-
-    // Initialize queue and start analysis thread
-    queue_init(&queue);
+    state("running", 1);
+    LOG_INFO_SIMPLE("Capture started (DLT=%d, offline=%d)\n", dlt, offline);
+    while (!stopped()) {
+        service_command(h);
+        struct pcap_pkthdr *header;
+        const u_char *data;
+        int n = pcap_next_ex(h, &header, &data);
+        if (n == 0) {
+            sleep_ms(5);
+            continue;
+        }
+        if (n == -2)
+            break;
+        if (n < 0) {
+            LOG_ERROR_MSG("Capture read failed: %s\n", pcap_geterr(h));
+            rc = 1;
+            break;
+        }
+        stats_capture_at(header->caplen, header->len,
+                         (int64_t)header->ts.tv_sec * 1000000 + header->ts.tv_usec);
+        mutex_lock(&control_cs);
+        last_packet = monotonic_ms();
+        mutex_unlock(&control_cs);
+        if (dump)
+            record_enqueue(header, data);
+        enqueue(header, data);
+    }
+    state("stopping", 0);
+    mutex_lock(&queue_cs);
+    queue_shutdown = 1;
+    mutex_unlock(&queue_cs);
 #ifdef _WIN32
-    HANDLE hThread = CreateThread(NULL, 0, analysis_thread, NULL, 0, NULL);
-    if (!hThread) {
-        fprintf(stderr, "Failed to create analysis thread\n");
-        pcap_close(adhandle);
-        g_handle = NULL;
-        queue_destroy(&queue);
-        return;
-    }
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+    SetConsoleCtrlHandler(console_handler, FALSE);
 #else
-    pthread_t thr;
-    if (pthread_create(&thr, NULL, analysis_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create analysis thread\n");
-        pcap_close(adhandle);
-        g_handle = NULL;
-        queue_destroy(&queue);
-        return;
-    }
+    pthread_join(thread, NULL);
+    sigaction(SIGINT, &old_int, NULL);
+    sigaction(SIGTERM, &old_term, NULL);
 #endif
-
-    // Start capture loop (main thread); breaks on Ctrl+C / error / EOF (offline rc 0/2 ok)
-    int rc = pcap_loop(adhandle, 0, packet_handler, (u_char *)dumper);
-    if (rc == -1) fprintf(stderr, "pcap_loop error: %s\n", pcap_geterr(adhandle));
-
-    request_stop();
-#ifdef _WIN32
-    WaitForSingleObject(hThread, 5000);
-    CloseHandle(hThread);
-#else
-    pthread_join(thr, NULL);
-#endif
-    printf("Queue drained. Dropped (queue full): %d\n", queue.dropped);
-    if (!is_offline) {
-    struct pcap_stat ps;
-    if (pcap_stats(adhandle, &ps) == 0) {
-        printf("Kernel stats: received=%u dropped=%u ifdropped=%u\n",
-               ps.ps_recv, ps.ps_drop, ps.ps_ifdrop);
+    if (!offline) {
+        struct pcap_stat ps;
+        if (!pcap_stats(h, &ps))
+            LOG_INFO_SIMPLE("Kernel received=%u dropped=%u\n", ps.ps_recv, ps.ps_drop);
     }
-    }
-    queue_destroy(&queue);
-    if (dumper) pcap_dump_close(dumper);
-    pcap_close(adhandle);
-    g_handle = NULL;
+no_thread:
+    record_join();
+    if (flag_get(&record_failed))
+        rc = 1;
+    mutex_destroy(&queue_cs);
+    if (dump)
+        pcap_dump_close(dump);
+    pcap_close(h);
+    state(rc ? "failed" : "stopped", 0);
+    return rc;
 }

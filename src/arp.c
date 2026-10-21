@@ -1,3 +1,4 @@
+#include "logger.h"
 // ARP packet parsing
 #include "arp.h"
 #include "stats.h"
@@ -21,14 +22,15 @@ static void format_ip(u_int ip_addr, char *buffer, int size) {
 
 // MAC address formatting
 static void format_mac(const u_char *mac, char *buffer, int bufsize) {
-    snprintf(buffer, bufsize, "%02X:%02X:%02X:%02X:%02X:%02X",
-            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    snprintf(buffer, bufsize, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3],
+             mac[4], mac[5]);
 }
 
 void parse_arp(const u_char *data, int size) {
     if (size < (int)sizeof(arp_header_t)) {
-        printf("ARP: Truncated header (got %d, need %d)\n",
-               size, (int)sizeof(arp_header_t));
+        stats_note("truncated");
+        LOG_DEBUG_SIMPLE("ARP: Truncated header (got %d, need %d)\n", size,
+                         (int)sizeof(arp_header_t));
         return;
     }
     arp_header_t arp;
@@ -37,15 +39,16 @@ void parse_arp(const u_char *data, int size) {
 
     // Validate packet
     if (ntohs(arp.hardware_type) != 1) {
-        printf("ARP: Unsupported hardware type %u\n", ntohs(arp.hardware_type));
+        LOG_DEBUG_SIMPLE("ARP: Unsupported hardware type %u\n", ntohs(arp.hardware_type));
         return;
     }
     if (ntohs(arp.protocol_type) != 0x0800) {
-        printf("ARP: Unsupported protocol type 0x%04X\n", ntohs(arp.protocol_type));
+        LOG_DEBUG_SIMPLE("ARP: Unsupported protocol type 0x%04X\n", ntohs(arp.protocol_type));
         return;
     }
     if (arp.hardware_size != 6 || arp.protocol_size != 4) {
-        printf("ARP: Bad sizes hlen=%u plen=%u\n", arp.hardware_size, arp.protocol_size);
+        stats_note("malformed");
+        LOG_DEBUG_SIMPLE("ARP: Bad sizes hlen=%u plen=%u\n", arp.hardware_size, arp.protocol_size);
         return;
     }
 
@@ -62,27 +65,37 @@ void parse_arp(const u_char *data, int size) {
     u_short op = ntohs(arp.operation);
     const char *op_name;
     switch (op) {
-        case 1:  op_name = "ARP Request"; break;
-        case 2:  op_name = "ARP Reply"; break;
-        case 3:  op_name = "RARP Request"; break;
-        case 4:  op_name = "RARP Reply"; break;
-        default: op_name = "Unknown"; break;
+    case 1:
+        op_name = "ARP Request";
+        break;
+    case 2:
+        op_name = "ARP Reply";
+        break;
+    case 3:
+        op_name = "RARP Request";
+        break;
+    case 4:
+        op_name = "RARP Reply";
+        break;
+    default:
+        op_name = "Unknown";
+        break;
     }
 
     // Display packet info
-    printf("ARP: %s\n", op_name);
-    printf("     Sender: %s (%s)\n", sender_ip, sender_mac);
+    LOG_DEBUG_SIMPLE("ARP: %s\n", op_name);
+    LOG_DEBUG_SIMPLE("     Sender: %s (%s)\n", sender_ip, sender_mac);
     security_arp(op, sender_ip, sender_mac, target_ip);
 
     if (op == 1) {
-        printf("     Target: %s (Broadcast)\n", target_ip);
+        LOG_DEBUG_SIMPLE("     Target: %s (Broadcast)\n", target_ip);
     } else {
-        printf("     Target: %s (%s)\n", target_ip, target_mac);
+        LOG_DEBUG_SIMPLE("     Target: %s (%s)\n", target_ip, target_mac);
     }
 
     // Packet details
-    printf("     Hardware Type: Ethernet (0x%04X)\n", ntohs(arp.hardware_type));
-    printf("     Protocol Type: IPv4 (0x%04X)\n", ntohs(arp.protocol_type));
-    printf("     Hardware Size: %u bytes\n", arp.hardware_size);
-    printf("     Protocol Size: %u bytes\n", arp.protocol_size);
+    LOG_DEBUG_SIMPLE("     Hardware Type: Ethernet (0x%04X)\n", ntohs(arp.hardware_type));
+    LOG_DEBUG_SIMPLE("     Protocol Type: IPv4 (0x%04X)\n", ntohs(arp.protocol_type));
+    LOG_DEBUG_SIMPLE("     Hardware Size: %u bytes\n", arp.hardware_size);
+    LOG_DEBUG_SIMPLE("     Protocol Size: %u bytes\n", arp.protocol_size);
 }

@@ -5,58 +5,81 @@
 #include "logger.h"
 #include "api.h"
 #include "security.h"
+#include "util.h"
 #include <ctype.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static void usage(const char *prog) {
     printf("Usage: %s [--iface N|NAME] [--filter BPF] [--verbose] [--quiet] [--no-db]\n", prog);
-    printf("       [--log-level 0-3] [--snaplen N] [--no-promisc] [--timeout-ms N] [--write file.pcap]\n");
+    printf("       [--log-level 0-3] [--snaplen N] [--no-promisc] [--timeout-ms N] [--write "
+           "file.pcap]\n");
     printf("       [--read file.pcap] [--api-port PORT] [--api-bind ADDR] [--api-token TOKEN]\n");
     printf("Env: SNIFFER_IFACE, SNIFFER_FILTER, SNIFFER_VERBOSE=1, SNIFFER_SNAPLEN,\n");
     printf("     SNIFFER_PROMISC=0, SNIFFER_TIMEOUT_MS, SNIFFER_WRITE, SNIFFER_READ,\n");
     printf("     SNIFFER_API_PORT, SNIFFER_API_BIND, SNIFFER_API_TOKEN, DATABASE_URL,\n");
     printf("     POSTGRES_CONNINFO, AWS_RDS_CONNINFO, LOG_LEVEL=0-3\n");
+    printf("       [--state-dir DIR] [--no-env] [--db-required]\n");
     printf("Note: --read (offline replay, no capture privileges needed) conflicts with --write.\n");
 }
 
 static void set_env(const char *k, const char *v) {
 #ifdef _WIN32
-    char buf[1024];
-    snprintf(buf, sizeof(buf), "%s=%s", k, v);
-    _putenv(buf);
+    if (_putenv_s(k, v)) {
+        fprintf(stderr, "Cannot set configuration %s\n", k);
+        exit(1);
+    }
 #else
     setenv(k, v, 1);
 #endif
 }
 
 // Minimal .env loader (KEY=VALUE per line, # comments), from remote work
-static void load_env_file(const char *path) {
+static int load_env_file(const char *path) {
     FILE *fp = fopen(path, "r");
-    if (!fp) return;
+    if (!fp)
+        return errno == ENOENT ? 0 : -1;
     char line[2048];
     int n = 0;
     while (fgets(line, sizeof(line), fp)) {
         size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+        if (len == sizeof(line) - 1 && line[len - 1] != '\n') {
+            int next = fgetc(fp);
+            if (next != EOF) {
+                fclose(fp);
+                return -1;
+            }
+        }
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
             line[--len] = '\0';
         char *s = line;
-        while (*s && isspace((unsigned char)*s)) s++;
-        if (*s == '\0' || *s == '#') continue;
+        while (*s && isspace((unsigned char)*s))
+            s++;
+        if (*s == '\0' || *s == '#')
+            continue;
         char *eq = strchr(s, '=');
-        if (!eq) continue;
+        if (!eq) {
+            fclose(fp);
+            return -1;
+        }
         *eq = '\0';
         char *key = s, *val = eq + 1;
-        while (*key && isspace((unsigned char)*key)) key++;
+        while (*key && isspace((unsigned char)*key))
+            key++;
         char *ke = key + strlen(key);
-        while (ke > key && isspace((unsigned char)ke[-1])) *--ke = '\0';
-        while (*val && isspace((unsigned char)*val)) val++;
+        while (ke > key && isspace((unsigned char)ke[-1]))
+            *--ke = '\0';
+        while (*val && isspace((unsigned char)*val))
+            val++;
         char *ve = val + strlen(val);
-        while (ve > val && isspace((unsigned char)ve[-1])) *--ve = '\0';
-        
+        while (ve > val && isspace((unsigned char)ve[-1]))
+            *--ve = '\0';
+
         // Handle quoted values: "value" or 'value', with escape support
-        if ((*val == '"' && *(ve-1) == '"') || (*val == '\'' && *(ve-1) == '\'')) {
+        if (ve - val >= 2 &&
+            ((*val == '"' && *(ve - 1) == '"') || (*val == '\'' && *(ve - 1) == '\''))) {
             val++;
             ve--;
             // Unescape: handle \" \' \\ and \n \t \r
@@ -65,13 +88,27 @@ static void load_env_file(const char *path) {
                 if (*src == '\\' && src + 1 < ve) {
                     src++;
                     switch (*src) {
-                        case 'n': *dst++ = '\n'; break;
-                        case 't': *dst++ = '\t'; break;
-                        case 'r': *dst++ = '\r'; break;
-                        case '"': *dst++ = '"'; break;
-                        case '\'': *dst++ = '\''; break;
-                        case '\\': *dst++ = '\\'; break;
-                        default: *dst++ = *src; break;
+                    case 'n':
+                        *dst++ = '\n';
+                        break;
+                    case 't':
+                        *dst++ = '\t';
+                        break;
+                    case 'r':
+                        *dst++ = '\r';
+                        break;
+                    case '"':
+                        *dst++ = '"';
+                        break;
+                    case '\'':
+                        *dst++ = '\'';
+                        break;
+                    case '\\':
+                        *dst++ = '\\';
+                        break;
+                    default:
+                        *dst++ = *src;
+                        break;
                     }
                 } else {
                     *dst++ = *src;
@@ -80,34 +117,61 @@ static void load_env_file(const char *path) {
             ve = dst;
         }
         *ve = '\0';
-        
-        if (*key == '\0') continue;
+
+        if (*key == '\0')
+            continue;
         // Don't override real environment
-        if (getenv(key)) continue;
+        if (getenv(key))
+            continue;
         set_env(key, val);
         n++;
     }
+    int error = ferror(fp);
     fclose(fp);
-    if (n > 0) printf("[+] Loaded %d vars from %s\n", n, path);
+    if (n > 0)
+        printf("[+] Loaded %d vars from %s\n", n, path);
+    return error ? -1 : 0;
 }
 
 static const char *get_postgres_conninfo(void) {
     // AWS RDS first (remote convention), then generic vars
     const char *c = getenv("AWS_RDS_CONNINFO");
-    if (c && c[0]) { printf("[+] Using AWS_RDS_CONNINFO\n"); return c; }
+    if (c && c[0]) {
+        printf("[+] Using AWS_RDS_CONNINFO\n");
+        return c;
+    }
     c = getenv("DATABASE_URL");
-    if (c && c[0]) return c;
+    if (c && c[0])
+        return c;
     c = getenv("POSTGRES_CONNINFO");
-    if (c && c[0]) return c;
+    if (c && c[0])
+        return c;
+    if (getenv("PGHOST"))
+        return "service-context";
     return NULL;
 }
 
 int main(int argc, char **argv) {
     printf("=== Packet Sniffer + Protocol Analyzer ===\n");
     log_init();
-    load_env_file(".env");
+    int no_env = 0;
+    for (int i = 1; i < argc; i++)
+        if (!strcmp(argv[i], "--no-env"))
+            no_env = 1;
+    if (!no_env && load_env_file(".env")) {
+        fprintf(stderr, "Invalid or unreadable .env\n");
+        return 1;
+    }
+    const char *initial_level = getenv("LOG_LEVEL");
+    long level;
+    if (initial_level && parse_integer(initial_level, 0, 3, &level)) {
+        fprintf(stderr, "Invalid LOG_LEVEL\n");
+        return 1;
+    }
+    if (initial_level)
+        current_log_level_int = (int)level;
 
-    int no_db = 0;
+    int no_db = 0, db_required = 0;
     for (int i = 1; i < argc; i++) {
         if ((strcmp(argv[i], "--iface") == 0) && i + 1 < argc) {
             set_env("SNIFFER_IFACE", argv[++i]);
@@ -118,6 +182,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--quiet") == 0) {
             current_log_level_int = LOG_ERROR;
             set_env("SNIFFER_QUIET", "1");
+        } else if (strcmp(argv[i], "--no-env") == 0) {
+            continue;
+        } else if (strcmp(argv[i], "--db-required") == 0) {
+            db_required = 1;
+        } else if (strcmp(argv[i], "--state-dir") == 0 && i + 1 < argc) {
+            set_env("SNIFFER_STATE_DIR", argv[++i]);
         } else if (strcmp(argv[i], "--no-db") == 0) {
             no_db = 1;
         } else if ((strcmp(argv[i], "--snaplen") == 0) && i + 1 < argc) {
@@ -137,10 +207,12 @@ int main(int argc, char **argv) {
         } else if ((strcmp(argv[i], "--api-token") == 0) && i + 1 < argc) {
             set_env("SNIFFER_API_TOKEN", argv[++i]);
         } else if ((strcmp(argv[i], "--log-level") == 0) && i + 1 < argc) {
-            int lv = atoi(argv[++i]);
-            if (lv < 0) lv = 0;
-            if (lv > 3) lv = 3;
-            current_log_level_int = lv;
+            long lv;
+            if (parse_integer(argv[++i], 0, 3, &lv)) {
+                fprintf(stderr, "Invalid log level\n");
+                return 1;
+            }
+            current_log_level_int = (int)lv;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage(argv[0]);
             return 0;
@@ -148,12 +220,6 @@ int main(int argc, char **argv) {
             usage(argv[0]);
             return 1;
         }
-    }
-
-    const char *ll = getenv("LOG_LEVEL");
-    if (ll) {
-        int lv = atoi(ll);
-        if (lv >= 0 && lv <= 3) current_log_level_int = lv;
     }
 
     // --read (offline replay) conflicts with --write (live record)
@@ -168,32 +234,69 @@ int main(int argc, char **argv) {
     }
 
     const char *conninfo = get_postgres_conninfo();
-    if (no_db) conninfo = NULL;
+    if (no_db)
+        conninfo = NULL;
+    if (conninfo && !strcmp(conninfo, "service-context"))
+        conninfo = " ";
     if (!conninfo)
-        printf("[*] No Postgres conninfo; JSON-only mode (set DATABASE_URL/AWS_RDS_CONNINFO or use --no-db).\n");
+        printf("[*] No Postgres conninfo; JSON-only mode (set DATABASE_URL/AWS_RDS_CONNINFO or use "
+               "--no-db).\n");
 
-    stats_init(conninfo);
-    security_init();
-    if (api_start() != 0) {
-        fprintf(stderr, "API failed to start (check SNIFFER_API_*).\n");
-        stats_cleanup();
-        db_disconnect();
-        return 1;
-    }
-    if (conninfo && conninfo[0]) {
-        // db.c layer kept for direct queries; connect best-effort
-        if (db_connect(conninfo) == 0) {
-            db_ensure_schema();
+    long value;
+    const char *numeric[] = {"SNIFFER_SNAPLEN",        "SNIFFER_TIMEOUT_MS",
+                             "SNIFFER_API_PORT",       "STATS_FLUSH_MS",
+                             "SNIFFER_QUEUE_BYTES",    "SNIFFER_SYN_THRESHOLD",
+                             "SNIFFER_DHCP_THRESHOLD", "SNIFFER_RETENTION_DAYS"};
+    const long minima[] = {68, 10, 0, 1000, 262144, 2, 2, 0},
+               maxima[] = {262144, 60000, 65535, 3600000, 1073741824, 64, 128, 36500};
+    for (unsigned i = 0; i < sizeof(numeric) / sizeof(numeric[0]); i++) {
+        const char *v = getenv(numeric[i]);
+        if (v && parse_integer(v, minima[i], maxima[i], &value)) {
+            fprintf(stderr, "Invalid %s\n", numeric[i]);
+            return 1;
         }
     }
-
-    start_sniffer();
-
-    // Flush on exit (Ctrl+C path also reaches here after pcap_breakloop)
+    if (db_required && (!conninfo || no_db)) {
+        fprintf(stderr, "--db-required needs a connection string\n");
+        return 1;
+    }
+    if (sniffer_init()) {
+        fprintf(stderr, "Capture initialization failed\n");
+        return 1;
+    }
+    if (stats_init(conninfo)) {
+        fprintf(stderr, "State/persistence initialization failed\n");
+        sniffer_cleanup();
+        return 1;
+    }
+    security_init();
+    if (db_required) {
+        uint64_t end = monotonic_ms() + 5000;
+        while (!stats_db_healthy() && monotonic_ms() < end)
+            sleep_ms(10);
+        if (!stats_db_healthy()) {
+            fprintf(stderr, "Required database unavailable\n");
+            stats_cleanup();
+            security_cleanup();
+            sniffer_cleanup();
+            return 1;
+        }
+    }
+    if (api_start()) {
+        fprintf(stderr, "API startup failed\n");
+        stats_cleanup();
+        security_cleanup();
+        sniffer_cleanup();
+        return 1;
+    }
+    int rc = start_sniffer();
     api_stop();
-    stats_save_json("stats.json");
-    if (!no_db) stats_save_postgres(NULL);
-    stats_cleanup();
-    db_disconnect();
-    return 0;
+    if (db_required && !stats_db_healthy())
+        rc = 1;
+    if (stats_cleanup())
+        rc = 1;
+    security_cleanup();
+    sniffer_cleanup();
+    log_cleanup();
+    return rc;
 }

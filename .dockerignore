@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+build
+pgdata
+.vscode
+*.obj
+*.exe
+*.dll
+stats.json*
+pending-*.json*
+.sniffer.lock
+.replay-*
+stderr.txt

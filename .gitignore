@@ -101,3 +101,17 @@ certs/
 core
 core.*
 gmon.out
+
+# Versioned runtime state and journals
+.sniffer.lock
+pending-stats.json
+pending-alerts.jsonl
+stats.json.legacy
+.replay-*/
+stats.json.legacy.*
+__pycache__/
+*.pyc
+
+# Vendored source and its upstream license are part of this project
+!src/vendor/
+!src/vendor/**

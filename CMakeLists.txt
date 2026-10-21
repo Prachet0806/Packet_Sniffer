@@ -1,160 +1,114 @@
 cmake_minimum_required(VERSION 3.16)
-project(packet_sniffer C)
-
+project(packet_sniffer VERSION 2.0.0 LANGUAGES C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-
-# Sources (explicit list so missing files fail fast)
-set(SNIFFER_LIB_SOURCES
-    src/sniffer.c
-    src/analyzer.c
-    src/ethernet.c
-    src/ip.c
-    src/arp.c
-    src/dns.c
-    src/icmp.c
-    src/tcp.c
-    src/udp.c
-    src/http.c
-    src/https.c
-    src/dhcp.c
-    src/logger.c
-    src/stats.c
-    src/db.c
-    src/security.c
-    src/api.c
-)
-
-add_library(sniffer_lib STATIC ${SNIFFER_LIB_SOURCES})
+set(CMAKE_C_EXTENSIONS OFF)
+include(CTest)
+option(SNIFFER_POSTGRES "Enable PostgreSQL when compatible headers/libraries exist" ON)
+option(SNIFFER_SANITIZERS "Enable address/undefined sanitizers" OFF)
+find_package(Threads REQUIRED)
+set(SOURCES sniffer analyzer ethernet ip arp dns icmp tcp udp http https dhcp logger stats db security api util stream json_tokens)
+foreach(name IN LISTS SOURCES)
+    list(APPEND SOURCE_FILES src/${name}.c)
+endforeach()
+add_library(sniffer_lib STATIC ${SOURCE_FILES})
 target_include_directories(sniffer_lib PUBLIC src)
-
-add_executable(sniffer src/main.c)
-target_include_directories(sniffer PRIVATE src)
-target_link_libraries(sniffer PRIVATE sniffer_lib)
-
+target_link_libraries(sniffer_lib PUBLIC Threads::Threads)
 if(MSVC)
-    target_compile_options(sniffer_lib PRIVATE /W4 /std:c11)
-    target_compile_options(sniffer PRIVATE /W4 /std:c11)
+    target_compile_options(sniffer_lib PRIVATE /W4)
 else()
-    target_compile_options(sniffer_lib PRIVATE -Wall -Wextra -Wpedantic -std=c11)
-    target_compile_options(sniffer PRIVATE -Wall -Wextra -Wpedantic -std=c11)
+    target_compile_options(sniffer_lib PRIVATE -Wall -Wextra -Wpedantic)
+    target_link_libraries(sniffer_lib PUBLIC m)
 endif()
 if(WIN32)
-    target_compile_definitions(sniffer_lib PUBLIC WIN32_LEAN_AND_MEAN _WINSOCK_DEPRECATED_NO_WARNINGS _CRT_SECURE_NO_WARNINGS)
-endif()
-
-# Allow overriding SDK locations via env vars:
-#   NPCAP_SDK, POSTGRES_ROOT
-if(WIN32)
-    # Determine architecture-specific lib directory
-    set(NPCAP_LIB_ARCH "x64")
-    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AARCH64")
-        set(NPCAP_LIB_ARCH "arm64")
+    target_compile_definitions(sniffer_lib PUBLIC WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
+    set(NPCAP_ARCH x64)
+    if(CMAKE_SIZEOF_VOID_P EQUAL 4)
+        set(NPCAP_ARCH "")
+    elseif(CMAKE_GENERATOR_PLATFORM MATCHES "[Aa][Rr][Mm]64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64|aarch64")
+        set(NPCAP_ARCH arm64)
     endif()
-    
-    if(DEFINED ENV{NPCAP_SDK})
-        target_include_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Include)
-        target_link_directories(sniffer_lib PUBLIC $ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH})
-        # Stage Npcap runtime DLLs next to the test executables. The SDK lib
-        # dir ships only .lib files; CopyNpcapDLLs.cmake falls back to the
-        # installed runtime locations (C:/Windows/System32/Npcap, ...).
-        add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND}
-                "-DNPCAP_SRC_DIR=$ENV{NPCAP_SDK}/Lib/${NPCAP_LIB_ARCH}"
-                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
-                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
-            COMMENT "Copying Npcap DLLs for test execution"
-        )
-    elseif(EXISTS "C:/npcap-sdk/Include")
-        target_include_directories(sniffer_lib PUBLIC C:/npcap-sdk/Include)
-        target_link_directories(sniffer_lib PUBLIC C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH})
-        add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND}
-                "-DNPCAP_SRC_DIR=C:/npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
-                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
-                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
-            COMMENT "Copying Npcap DLLs for test execution"
-        )
-    elseif(EXISTS "C:/Program Files/Npcap-sdk/Include")
-        target_include_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Include")
-        target_link_directories(sniffer_lib PUBLIC "C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}")
-        add_custom_command(TARGET sniffer POST_BUILD
-            COMMAND ${CMAKE_COMMAND}
-                "-DNPCAP_SRC_DIR=C:/Program Files/Npcap-sdk/Lib/${NPCAP_LIB_ARCH}"
-                "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:sniffer>"
-                -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake"
-            COMMENT "Copying Npcap DLLs for test execution"
-        )
-    endif()
-    if(DEFINED ENV{POSTGRES_ROOT})
-        target_include_directories(sniffer_lib PUBLIC $ENV{POSTGRES_ROOT}/include)
-        target_link_directories(sniffer_lib PUBLIC $ENV{POSTGRES_ROOT}/lib)
-    endif()
-    target_link_libraries(sniffer_lib PUBLIC wpcap Packet ws2_32 iphlpapi)
-    # libpq is optional: build still works without PostgreSQL
-    find_library(LIBPQ_LIB pq libpq PATHS
-        "$ENV{POSTGRES_ROOT}/lib"
-        "C:/Program Files/PostgreSQL/17/lib"
-        "C:/Program Files/PostgreSQL/16/lib"
-        "C:/Program Files/PostgreSQL/15/lib"
-        "C:/Program Files/PostgreSQL/14/lib")
-    find_path(LIBPQ_INCLUDE_DIR libpq-fe.h PATHS
-        "$ENV{POSTGRES_ROOT}/include"
-        "C:/Program Files/PostgreSQL/17/include"
-        "C:/Program Files/PostgreSQL/16/include"
-        "C:/Program Files/PostgreSQL/15/include"
-        "C:/Program Files/PostgreSQL/14/include")
-    if(LIBPQ_LIB AND LIBPQ_INCLUDE_DIR)
-        target_include_directories(sniffer_lib PUBLIC ${LIBPQ_INCLUDE_DIR})
-        target_link_libraries(sniffer_lib PUBLIC ${LIBPQ_LIB})
-        target_compile_definitions(sniffer_lib PUBLIC HAVE_LIBPQ=1)
-    else()
-        message(WARNING "libpq not found; PostgreSQL support disabled. Set POSTGRES_ROOT.")
-    endif()
+    find_path(PCAP_INCLUDE pcap.h PATHS "$ENV{NPCAP_SDK}/Include" "C:/npcap-sdk/Include")
+    find_library(PCAP_LIBRARY wpcap PATHS "$ENV{NPCAP_SDK}/Lib/${NPCAP_ARCH}" "C:/npcap-sdk/Lib/${NPCAP_ARCH}")
+    find_library(PACKET_LIBRARY Packet PATHS "$ENV{NPCAP_SDK}/Lib/${NPCAP_ARCH}" "C:/npcap-sdk/Lib/${NPCAP_ARCH}")
+    target_link_libraries(sniffer_lib PUBLIC ws2_32 iphlpapi ${PACKET_LIBRARY})
 else()
-    # glibc with -std=c11 hides BSD types (u_char/u_short/u_int) used by
-    # libpcap unless _DEFAULT_SOURCE is defined, and hides clock_gettime/
-    # nanosleep unless _POSIX_C_SOURCE>=199309L. Define on the command line
-    # so it applies before ANY system header in every TU (per-file #defines
-    # are too late once pcap.h is pulled in transitively).
     target_compile_definitions(sniffer_lib PUBLIC _DEFAULT_SOURCE _POSIX_C_SOURCE=200809L)
-    find_path(PCAP_INCLUDE_DIR pcap.h)
-    find_library(PCAP_LIB pcap)
-    if(NOT PCAP_LIB)
-        message(FATAL_ERROR "libpcap not found. Install libpcap-dev (apt) / libpcap-devel (yum).")
-    endif()
-    target_include_directories(sniffer_lib PUBLIC ${PCAP_INCLUDE_DIR})
-    target_link_libraries(sniffer_lib PUBLIC ${PCAP_LIB} pthread)
-    find_path(LIBPQ_INCLUDE_DIR libpq-fe.h PATHS /usr/include/postgresql)
-    find_library(LIBPQ_LIB pq)
-    if(LIBPQ_LIB)
-        if(LIBPQ_INCLUDE_DIR)
-            target_include_directories(sniffer_lib PUBLIC ${LIBPQ_INCLUDE_DIR})
-        endif()
-        target_link_libraries(sniffer_lib PUBLIC ${LIBPQ_LIB})
-        target_compile_definitions(sniffer_lib PUBLIC HAVE_LIBPQ=1)
+    find_path(PCAP_INCLUDE pcap.h)
+    find_library(PCAP_LIBRARY pcap)
+endif()
+if(NOT PCAP_INCLUDE OR NOT PCAP_LIBRARY)
+    message(FATAL_ERROR "Compatible libpcap/Npcap headers and library are required")
+endif()
+target_include_directories(sniffer_lib PUBLIC ${PCAP_INCLUDE})
+target_link_libraries(sniffer_lib PUBLIC ${PCAP_LIBRARY})
+if(SNIFFER_POSTGRES)
+    find_package(PostgreSQL QUIET)
+    if(PostgreSQL_FOUND)
+        target_include_directories(sniffer_lib PRIVATE ${PostgreSQL_INCLUDE_DIRS})
+        target_link_libraries(sniffer_lib PUBLIC ${PostgreSQL_LIBRARIES})
+        target_compile_definitions(sniffer_lib PRIVATE HAVE_LIBPQ=1)
     else()
-        message(WARNING "libpq not found; PostgreSQL support disabled.")
+        message(STATUS "PostgreSQL not found: explicit JSON/journal-only build")
     endif()
 endif()
-
-# Pthreads on Windows via MSVC is built-in via CriticalSection abstraction;
-# no extra link needed there.
-
-enable_testing()
-add_executable(smoke tests/smoke_parsers.c)
-target_link_libraries(smoke PRIVATE sniffer_lib)
-if(NOT MSVC)
-    target_link_libraries(smoke PRIVATE pthread)
+file(READ "${CMAKE_SOURCE_DIR}/db_migration_add_dhcp.sql" SNIFFER_SCHEMA)
+string(REPLACE "\\" "\\\\" SNIFFER_SCHEMA "${SNIFFER_SCHEMA}")
+string(REPLACE "\"" "\\\"" SNIFFER_SCHEMA "${SNIFFER_SCHEMA}")
+string(REPLACE "\n" "\\n\"\n\"" SNIFFER_SCHEMA "${SNIFFER_SCHEMA}")
+configure_file(src/schema_sql.h.in generated/schema_sql.h @ONLY)
+target_include_directories(sniffer_lib PRIVATE "${CMAKE_BINARY_DIR}/generated")
+if(SNIFFER_SANITIZERS AND NOT MSVC)
+    target_compile_options(sniffer_lib PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(sniffer_lib PUBLIC -fsanitize=address,undefined)
+    if(UNIX AND NOT APPLE)
+        # Older sanitizer runtimes can collide with PIE mappings under newer WSL kernels.
+        target_compile_options(sniffer_lib PUBLIC -fno-pie)
+        target_link_options(sniffer_lib PUBLIC -no-pie)
+    endif()
 endif()
-add_test(NAME smoke COMMAND smoke "${CMAKE_BINARY_DIR}/smoke-stats.json")
-add_test(NAME help COMMAND sniffer --help)
-set_tests_properties(smoke help PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
-# Long-lived API fixture for manual curl checks (not run by default in ctest)
-add_executable(api_alive tests/api_alive.c)
-target_link_libraries(api_alive PRIVATE sniffer_lib)
-if(EXISTS "${CMAKE_SOURCE_DIR}/tests/pcaps/eth-tcp-http.pcap")
-    add_test(NAME replay
-        COMMAND sniffer --read "${CMAKE_SOURCE_DIR}/tests/pcaps/eth-tcp-http.pcap" --no-db --quiet)
-    set_tests_properties(replay PROPERTIES WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+add_executable(sniffer src/main.c)
+target_link_libraries(sniffer PRIVATE sniffer_lib)
+set(EXECUTABLES sniffer)
+if(BUILD_TESTING)
+    add_executable(smoke tests/smoke_parsers.c)
+    add_executable(regression tests/regression.c)
+    add_executable(api_alive tests/api_alive.c)
+    add_executable(stats_stress tests/stats_stress.c)
+    foreach(t smoke regression api_alive stats_stress)
+        target_link_libraries(${t} PRIVATE sniffer_lib)
+        list(APPEND EXECUTABLES ${t})
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME integration COMMAND ${Python3_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tests/integration.py" "$<TARGET_FILE:sniffer>" "$<TARGET_FILE:api_alive>" "$<TARGET_FILE:regression>" "$<TARGET_FILE:smoke>" "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(integration PROPERTIES TIMEOUT 90)
+endif()
+if(WIN32)
+    foreach(t IN LISTS EXECUTABLES)
+        add_custom_command(TARGET ${t} POST_BUILD COMMAND ${CMAKE_COMMAND} "-DNPCAP_SRC_DIR=$ENV{NPCAP_SDK}/Lib/${NPCAP_ARCH}" "-DNPCAP_ARCH=${NPCAP_ARCH}" "-DNPCAP_DST_DIR=$<TARGET_FILE_DIR:${t}>" -P "${CMAKE_SOURCE_DIR}/cmake/CopyNpcapDLLs.cmake")
+        if(PostgreSQL_FOUND)
+            get_filename_component(PGROOT "${PostgreSQL_INCLUDE_DIR}" DIRECTORY)
+            file(GLOB PGDLL "${PGROOT}/bin/*.dll")
+            if(PGDLL)
+                add_custom_command(TARGET ${t} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PGDLL} "$<TARGET_FILE_DIR:${t}>")
+            endif()
+        endif()
+    endforeach()
+endif()
+
+option(SNIFFER_FUZZ "Build the Clang libFuzzer parser harness" OFF)
+if(SNIFFER_FUZZ)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "SNIFFER_FUZZ requires Clang")
+    endif()
+    target_compile_options(sniffer_lib PRIVATE -fsanitize=fuzzer-no-link,address,undefined)
+    target_link_options(sniffer_lib PUBLIC -fsanitize=fuzzer-no-link,address,undefined)
+    if(UNIX AND NOT APPLE)
+        target_compile_options(sniffer_lib PUBLIC -fno-pie)
+        target_link_options(sniffer_lib PUBLIC -no-pie)
+    endif()
+    add_executable(fuzz_parsers tests/fuzz_parsers.c)
+    target_link_libraries(fuzz_parsers PRIVATE sniffer_lib)
+    target_compile_options(fuzz_parsers PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(fuzz_parsers PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()

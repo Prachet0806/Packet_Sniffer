@@ -1,0 +1,2 @@
+/* Generated from the canonical versioned migration. */
+static const char schema_sql[] = "@SNIFFER_SCHEMA@";

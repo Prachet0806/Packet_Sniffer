@@ -18,13 +18,13 @@
 typedef struct {
     u_short hardware_type;
     u_short protocol_type;
-    u_char  hardware_size;
-    u_char  protocol_size;
+    u_char hardware_size;
+    u_char protocol_size;
     u_short operation;
-    u_char  sender_mac[6];
-    u_int   sender_ip;
-    u_char  target_mac[6];
-    u_int   target_ip;
+    u_char sender_mac[6];
+    u_int sender_ip;
+    u_char target_mac[6];
+    u_int target_ip;
 } arp_header_t;
 #pragma pack(pop)
 

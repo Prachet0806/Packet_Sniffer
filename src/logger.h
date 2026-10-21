@@ -3,6 +3,7 @@
 #define LOGGER_H
 
 #include <stdio.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -12,10 +13,10 @@
 
 // Log levels
 typedef enum {
-    LOG_ERROR = 0,   // Errors only
-    LOG_WARN = 1,    // Warnings and errors
-    LOG_INFO = 2,    // Info, warnings, and errors
-    LOG_DEBUG = 3    // Everything including per-packet details
+    LOG_ERROR = 0, // Errors only
+    LOG_WARN = 1,  // Warnings and errors
+    LOG_INFO = 2,  // Info, warnings, and errors
+    LOG_DEBUG = 3  // Everything including per-packet details
 } LogLevel;
 
 // Global log level (set at startup; read concurrently afterwards)
@@ -29,6 +30,8 @@ extern CRITICAL_SECTION log_cs;
 extern pthread_mutex_t log_cs;
 #endif
 void log_init(void);
+void log_cleanup(void);
+uint64_t log_dropped(void);
 
 // Replace non-printable bytes (incl. ESC) with '.' — packet data must never
 // reach the terminal raw (ANSI-escape injection).
@@ -39,45 +42,77 @@ void log_emit_stdout(const char *msg);
 void log_emit_stderr(const char *msg);
 
 // Logging macros (locked, level-checked)
-#define LOG_ERROR_MSG(...) \
-    do { if (LOG_ERROR <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), "[ERROR] " __VA_ARGS__); \
-        log_emit_stderr(_lb); } } while(0)
+#define LOG_ERROR_MSG(...)                                                                         \
+    do {                                                                                           \
+        if (LOG_ERROR <= current_log_level_int) {                                                  \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), "[ERROR] " __VA_ARGS__);                                    \
+            log_emit_stderr(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_WARN_MSG(...) \
-    do { if (LOG_WARN <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), "[WARN] " __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_WARN_MSG(...)                                                                          \
+    do {                                                                                           \
+        if (LOG_WARN <= current_log_level_int) {                                                   \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), "[WARN] " __VA_ARGS__);                                     \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_INFO_MSG(...) \
-    do { if (LOG_INFO <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), "[INFO] " __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_INFO_MSG(...)                                                                          \
+    do {                                                                                           \
+        if (LOG_INFO <= current_log_level_int) {                                                   \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), "[INFO] " __VA_ARGS__);                                     \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_DEBUG_MSG(...) \
-    do { if (LOG_DEBUG <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), "[DEBUG] " __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_DEBUG_MSG(...)                                                                         \
+    do {                                                                                           \
+        if (LOG_DEBUG <= current_log_level_int) {                                                  \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), "[DEBUG] " __VA_ARGS__);                                    \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
 // Simpler versions without level prefix (for backward compatibility)
-#define LOG_ERROR_SIMPLE(...) \
-    do { if (LOG_ERROR <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), __VA_ARGS__); \
-        log_emit_stderr(_lb); } } while(0)
+#define LOG_ERROR_SIMPLE(...)                                                                      \
+    do {                                                                                           \
+        if (LOG_ERROR <= current_log_level_int) {                                                  \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), __VA_ARGS__);                                               \
+            log_emit_stderr(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_WARN_SIMPLE(...) \
-    do { if (LOG_WARN <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_WARN_SIMPLE(...)                                                                       \
+    do {                                                                                           \
+        if (LOG_WARN <= current_log_level_int) {                                                   \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), __VA_ARGS__);                                               \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_INFO_SIMPLE(...) \
-    do { if (LOG_INFO <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_INFO_SIMPLE(...)                                                                       \
+    do {                                                                                           \
+        if (LOG_INFO <= current_log_level_int) {                                                   \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), __VA_ARGS__);                                               \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
-#define LOG_DEBUG_SIMPLE(...) \
-    do { if (LOG_DEBUG <= current_log_level_int) { \
-        char _lb[1024]; snprintf(_lb, sizeof(_lb), __VA_ARGS__); \
-        log_emit_stdout(_lb); } } while(0)
+#define LOG_DEBUG_SIMPLE(...)                                                                      \
+    do {                                                                                           \
+        if (LOG_DEBUG <= current_log_level_int) {                                                  \
+            char _lb[1024];                                                                        \
+            snprintf(_lb, sizeof(_lb), __VA_ARGS__);                                               \
+            log_emit_stdout(_lb);                                                                  \
+        }                                                                                          \
+    } while (0)
 
 #endif // LOGGER_H

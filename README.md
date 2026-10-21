@@ -1,395 +1,125 @@
-# Packet Sniffer + Protocol Analyzer
+# Packet Sniffer and Protocol Analyzer
 
-A high-performance, multi-threaded network packet sniffer and protocol analyzer built in C. This tool captures network packets in real-time and provides detailed analysis of various network protocols.
+A C11 packet-capture pipeline for libpcap/Npcap with bounded queues, protocol observations, cumulative JSON statistics, optional PostgreSQL interval storage, a local HTTP API, and Grafana provisioning.
 
-## Features
+## Build and verify
 
-### Core Capabilities
-- **Multi-threaded Architecture**: Separate capture and analysis threads for optimal performance
-- **Thread-safe Queue**: Efficient packet buffering between capture and analysis
-- **Real-time Analysis**: Live packet dissection and display
-- **Statistics Collection**: Protocol-wise packet and byte counting with thread-safe aggregation
-- **Database Integration**: PostgreSQL storage for persistent statistics
-- **JSON Export/Import**: Statistics persistence in JSON format
-- **Docker Support**: Containerized deployment with Docker and Docker Compose
-- **Cross-platform Ready**: Uses libpcap (Windows/Linux/macOS compatible)
+Requirements: CMake 3.16+, C11 compiler, libpcap development files or the Npcap SDK/runtime, and Python 3 for tests. PostgreSQL client headers/libraries are optional.
 
-### Supported Protocols
-
-#### Data Link Layer
-- **Ethernet**: MAC address extraction, EtherType identification
-- **ARP**: Address Resolution Protocol (Request/Reply/RARP)
-
-#### Network Layer
-- **IPv4**: Complete header parsing, fragmentation support
-- **IPv6**: Full header parsing with extension header support
-  - Hop-by-Hop Options
-  - Destination Options
-  - Routing Headers
-  - Fragment Headers
-
-#### Transport Layer
-- **TCP**: Port analysis, sequence numbers, flags, window size
-- **UDP**: Port analysis, length validation
-- **ICMPv4**: Message types (Echo, Unreachable, Redirect, etc.) + embedded
-  offending-packet attribution for error messages
-- **ICMPv6**: IPv6 control messages (Echo, Neighbor Discovery, etc.) + embedded
-  packet attribution for error types 1-4
-
-#### Application Layer
-- **DNS**: Complete DNS query/response analysis
-  - A, AAAA, CNAME, MX, NS, PTR, TXT records
-  - Name compression support
-  - Query/Response flag analysis
-- **HTTP**: HTTP request/response parsing
-  - Request method and URI extraction
-  - Host header detection
-  - Response status line parsing
-- **HTTPS/TLS**: TLS protocol analysis
-  - TLS record type identification
-  - TLS version detection (SSL 3.0–TLS 1.2; 1.3 uses legacy `0x0303` on the wire)
-  - ClientHello SNI extraction
-  - Handshake and application data tracking
-- **DHCP**: DISCOVER/OFFER/REQUEST/ACK parsing (UDP ports 67/68) + minimal
-  DHCPv6 classifier (ports 546/547)
-  - Magic-cookie validation, message-type/lease/hostname options
-  - See `db_migration_add_dhcp.sql`, `AWS_RDS_QUICK_START.md`
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│              main.c                 │ ← Entry point
-│              sniffer.c/.h           │ ← Core capture engine
-│              analyzer.c/.h          │ ← Analysis coordinator
-├─────────────────────────────────────┤
-│           ethernet.c/.h             │ ← Data Link Layer
-│           arp.c/.h                  │
-├─────────────────────────────────────┤
-│              ip.c/.h                │ ← Network Layer (IPv4/IPv6)
-├─────────────────────────────────────┤
-│         tcp.c/.h  │  udp.c/.h       │ ← Transport Layer
-│         icmp.c/.h                   │
-├─────────────────────────────────────┤
-│         dns.c/.h  │  http.c/.h      │ ← Application Layer
-│   https.c/.h │ dhcp.c/.h │ logger.c/.h │
-├─────────────────────────────────────┤
-│         stats.c/.h  │  db.c/.h      │ ← Data Management
-└─────────────────────────────────────┘
-```
-
-## Building
-
-### Prerequisites
-- CMake 3.16+, C11 compiler (MSVC / GCC / Clang)
-- Npcap SDK (Windows, set `NPCAP_SDK`) or libpcap-dev (Linux)
-- PostgreSQL client (optional; set `POSTGRES_ROOT` on Windows). Build works without it (JSON-only mode).
-- Docker and Docker Compose - optional, for containerized deployment
-
-### Compilation (all platforms, recommended)
-```bash
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
-# binary: build/sniffer  (Windows: build/Release/sniffer.exe)
+ctest --test-dir build -C Release --output-on-failure
 ```
 
-Windows notes: open a VS Developer Prompt so `cl` is on PATH, or use
-`"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"`.
-MSVC + `libpq.lib` is required for PostgreSQL support with `cl`; MinGW builds
-default to JSON-only unless a MinGW-compatible libpq is provided.
+Windows: use MSVC, set `NPCAP_SDK` to the SDK root, and optionally set `PostgreSQL_ROOT` to your PostgreSQL installation. Runtime DLLs are staged with architecture validation. Use `-DSNIFFER_POSTGRES=OFF` for an explicit JSON-only build. Use `-DBUILD_TESTING=OFF` for production builds without Python/test sources.
 
-### Docker Deployment
-```bash
-# Copy secrets template first
-copy .env.example .env   # Windows / cp .env.example .env on Linux
-# Live capture (needs NET_RAW/NET_ADMIN) + Postgres + provisioned Grafana:
-docker compose up --build -d
-# Deterministic demo without privileges (replay profile):
-docker compose --profile replay up --build replay
-# Grafana :3000 (admin/admin) uses provisioned Postgres datasource, no manual setup.
-# sniffer service uses bridge networking (host=postgres); network_mode:host is
-# intentionally NOT used because it breaks compose DNS for host=postgres.
+Linux sanitizer verification:
+
+```sh
+cmake -S . -B build-asan -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug -DSNIFFER_SANITIZERS=ON
+cmake --build build-asan
+ctest --test-dir build-asan --output-on-failure
 ```
 
-## Quickstart (replay, no admin) vs Live vs Docker vs RDS
-- Replay (deterministic, no root): `sniffer --read tests/pcaps/eth-tcp-http.pcap --no-db --quiet`
-- Live: `sniffer --iface 1 --filter "tcp port 80" --verbose` (admin/root or NET_RAW)
-- Docker: see above; `replay` profile feeds Postgres/Grafana from `/pcaps`.
-- RDS: set `AWS_RDS_CONNINFO` (preferred) or `DATABASE_URL`; schema canonical key is
-  `protocol_stats.interval_start` (interval deltas in Postgres, cumulative in `stats.json`;
-  dashboards must `SUM()` over window, not read last row as gauge).
-- API (opt-in): `sniffer --api-port 8080 --api-token $TOKEN` then
-  `curl -H "Authorization: Bearer $TOKEN" localhost:8080/health|/stats|/alerts`.
-  Default bind `127.0.0.1` (`--api-bind 0.0.0.0` for Docker). `POST /filter {"bpf":"tcp port 80"}`
-  is live-only (rejected in `--read` mode). Unauth -> 401, burst -> 429.
-- Alerts (rule-based, no ML): SYN-scan, DNS-tunnel heuristics, ARP-spoof (gratuitous/flap),
-  DHCP-starvation (DISCOVER burst), TLS SNI length. Sink: stderr `[ALERT]` + `GET /alerts`
-  + `alerts(time,type,src,dst,detail)` table + Grafana panel. Blind spots: no TCP reassembly,
-  non-first frag skipped, IPv6 frag/ESP/AH stop, VLAN>2 truncated, port-heuristic evasion,
-  DNS auth/addl skipped, only first ClientHello SNI (ECH/TLS1.3 hidden).
+## Capture and replay
 
-## Usage
-
-1. **Run the application** (capture needs admin/root or `NET_RAW`/`NET_ADMIN`):
-   ```bash
-   ./build/sniffer --help
-   ./build/sniffer --iface 1 --filter "tcp port 80" --verbose
-   ./build/sniffer --iface eth0 --no-promisc --snaplen 4096 --write out.pcap --quiet
-   # Env alternatives: SNIFFER_IFACE, SNIFFER_FILTER, SNIFFER_VERBOSE=1,
-   #   SNIFFER_SNAPLEN, SNIFFER_PROMISC=0, SNIFFER_TIMEOUT_MS, SNIFFER_WRITE,
-   #   DATABASE_URL="host=localhost port=5432 dbname=snifferdb user=sniffer password=...",
-   #   AWS_RDS_CONNINFO (preferred for RDS), STATS_FLUSH_MS=60000, LOG_LEVEL=0-3,
-   #   --no-db for JSON-only
-   ```
-   Kernel drop counters (`pcap_stats`) and queue drops print on exit.
-
-2. **Select network interface**:
-   - Without `--iface`/`SNIFFER_IFACE` the program lists interfaces and prompts.
-   - In Docker / non-interactive shells you must pass `--iface` (index or name
-     substring) or set `SNIFFER_IFACE`, otherwise it exits instead of hanging.
-
-3. **Monitor traffic**:
-   - Packets are captured and analyzed in real-time
-   - Detailed protocol information is displayed
-   - Statistics are collected and can be exported to JSON or PostgreSQL
-
-4. **View statistics**:
-   - Statistics are automatically saved to `stats.json` (cumulative snapshot,
-     git-ignored) every flush interval
-   - PostgreSQL inserts are per-interval (counters reset after a successful
-     insert) — see `STATS_FLUSH_MS`, `db_ensure_schema()`, and
-     `db_migration_add_dhcp.sql` for older databases
-   - Configure PostgreSQL connection for database storage
-   - Use Grafana (via Docker Compose) for visualization
-
-## Sample Output
-
-```
-=== Packet Sniffer + Protocol Analyzer ===
-
-=== Available Devices ===
-1. \Device\NPF_{GUID} - Ethernet adapter (MAC: 00:11:22:33:44:55)
-
-Enter device number to capture: 1
-Listening on \Device\NPF_{GUID}...
-
-[+] Packet captured: length 74 bytes
-
-[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC FF:FF:FF:FF:FF:FF, Type 0x0806
-ARP: ARP Request
-     Sender: 192.168.1.100 (00:11:22:33:44:55)
-     Target: 192.168.1.1 (Broadcast)
-     Hardware Type: Ethernet (0x0001)
-     Protocol Type: IPv4 (0x0800)
-
-[+] Packet captured: length 98 bytes
-
-[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
-IPv4: 192.168.1.100 -> 8.8.8.8, TTL=64, Proto=17, Len=78
-UDP: 192.168.1.100:54321 -> 8.8.8.8:53, Len=58
-DNS: Query (ID=0x1234)
-     Flags: RD 
-     Questions: 1, Answers: 0, Authorities: 0, Additional: 0
-     Question: google.com (Type=1, Class=1)
-
-[+] Packet captured: length 542 bytes
-
-[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
-IPv4: 192.168.1.100 -> 93.184.216.34, TTL=64, Proto=6, Len=528
-TCP: 192.168.1.100:54321 -> 93.184.216.34:80, Seq=1234567890 Ack=987654321, Win=65535 [ACK PSH]
-[HTTP] 192.168.1.100:54321 -> 93.184.216.34:80 | GET /index.html HTTP/1.1
-[HTTP]   Host: example.com
-
-[+] Packet captured: length 128 bytes
-
-[Ethernet] Src MAC 00:11:22:33:44:55, Dst MAC 08:00:27:12:34:56, Type 0x0800
-IPv4: 192.168.1.100 -> 172.217.164.110, TTL=64, Proto=6, Len=114
-TCP: 192.168.1.100:54322 -> 172.217.164.110:443, Seq=2345678901 Ack=0, Win=65535 [SYN]
-HTTPS: 192.168.1.100:54322 -> 172.217.164.110:443, TLS Record: Handshake, Version=TLS 1.2-or-1.3-wire, Length=89
-HTTPS:   SNI=example.com
+```sh
+# Offline replay: no capture privileges, isolated automatically generated .replay-* state
+./build/sniffer --no-env --read tests/pcaps/eth-tcp-http.pcap --no-db --quiet
+# Explicit state directory (exclusive ownership); repeated runs resume its cumulative totals
+./build/sniffer --no-env --read tests/pcaps/dns.pcap --state-dir replay-state --no-db
+# Native live capture: exact interface name or unique substring/index
+./build/sniffer --iface eth0 --filter 'tcp and (port 80 or port 443)' --state-dir live-state
+# Packet details are DEBUG output
+./build/sniffer --iface eth0 --log-level 3 --write capture.pcap
 ```
 
-## Technical Details
+Capture requires appropriate operating-system privileges. An invalid filter, missing input, ambiguous interface, or recording-open failure exits nonzero. SIGINT/SIGTERM/Ctrl+C request orderly shutdown. A live loop polls pcap nonblocking so idle traffic does not prevent command handling or shutdown.
 
-### Threading Model
-- **Capture Thread**: Continuously captures packets using pcap_loop()
-- **Analysis Thread**: Processes queued packets through protocol stack
-- **Thread-safe Queue**: Critical Sections / pthread mutexes + condition variables
-- **Thread-safe Logging**: All log output serialized through `logger.c`; packet-derived
-  strings are sanitized (non-printables → `.`) against terminal-escape injection
-
-### Memory Management
-- Dynamic packet buffer allocation
-- Automatic cleanup after analysis
-- Efficient memory usage with proper deallocation
-
-### Performance Features
-- Zero-copy packet queuing
-- Lock-free data structures where possible
-- Optimized protocol parsing algorithms
-- Batch statistics updates for reduced database overhead
-
-### Statistics & Data Management
-- **Thread-safe Statistics**: Protocol-wise packet and byte counting
-- **JSON Persistence**: Statistics export/import in JSON format
-- **PostgreSQL Integration**: Persistent storage in PostgreSQL database
-- **Batch Processing**: Periodic batch updates to reduce database load
-- **Grafana Integration**: Ready for visualization with Grafana (via Docker Compose)
-
-## File Structure
-
-```
-Packet_Sniffer/
-├── src/
-│   ├── main.c              # Application entry point
-│   ├── sniffer.c/.h        # Core packet capture engine
-│   ├── analyzer.c/.h       # Packet analysis coordinator
-│   ├── ethernet.c/.h       # Ethernet frame parsing
-│   ├── ip.c/.h            # IPv4/IPv6 packet parsing
-│   ├── tcp.c/.h           # TCP segment parsing
-│   ├── udp.c/.h           # UDP datagram parsing
-│   ├── icmp.c/.h          # ICMP message parsing
-│   ├── arp.c/.h           # ARP packet parsing
-│   ├── dns.c/.h           # DNS query/response parsing
-│   ├── dhcp.c/.h          # DHCP message parsing (ports 67/68)
-│   ├── logger.c/.h        # Log-level gated logging
-│   ├── http.c/.h          # HTTP protocol parsing
-│   ├── https.c/.h         # HTTPS/TLS protocol parsing
-│   ├── stats.c/.h         # Statistics collection and management
-│   └── db.c/.h            # PostgreSQL database integration
-├── db_migration_add_dhcp.sql  # DHCP columns migration
-├── AWS_RDS_QUICK_START.md / AWS_QUICK_REFERENCE.md  # RDS docs
-├── build/
-│   ├── sniffer.exe        # Compiled executable
-│   └── stats.json         # Statistics export file
-├── pgdata/                # PostgreSQL data volume (Docker)
-├── Dockerfile             # Docker container definition
-├── docker-compose.yaml    # Docker Compose configuration
-├── .gitignore            # Git ignore rules
-└── README.md             # This file
-```
-
-## Protocol Support Details
-
-### IPv6 Extension Headers
-- **Hop-by-Hop Options**: Router-examined options
-- **Destination Options**: Destination-specific configuration
-- **Routing Headers**: Source routing with segment tracking
-- **Fragment Headers**: IPv6 fragmentation information
-
-### DNS Features
-- **Record Types**: A, AAAA, CNAME, MX, NS, PTR, TXT
-- **Name Compression**: Handles DNS pointer compression
-- **Flag Analysis**: QR, AA, TC, RD, RA, AD, CD flags
-- **Response Codes**: Complete error code interpretation
-
-### ARP Support
-- **Operation Types**: Request, Reply (RARP shares the ARP format on EtherType `0x8035`)
-- **Address Resolution**: IP-to-MAC mapping display
-- **Broadcast Detection**: Identifies broadcast ARP requests
-
-### HTTP Features
-- **Request Parsing**: HTTP method, URI, and version extraction
-- **Header Analysis**: Host header detection and display
-- **Response Parsing**: HTTP status line analysis
-- **Case-insensitive Matching**: Robust header field detection
-
-### HTTPS/TLS Features
-- **TLS Record Parsing**: Content type identification (Handshake, ApplicationData, Alert, etc.)
-- **Version Detection**: SSL 3.0–TLS 1.2; TLS 1.3 uses legacy `0x0303` on the wire
-  (true version is in the `supported_versions` extension), so it is reported as
-  `TLS 1.2-or-1.3-wire`.
-- **Record Length Analysis**: TLS record size tracking, truncated-record detection
-- **Future Extension**: SNI parsing
-
-### Statistics System
-- **Protocol Counters**: Per-protocol packet and byte counts
-- **Thread-safe Updates**: Concurrent statistics updates with critical sections
-- **Batch Processing**: Periodic database updates for performance
-- **JSON Export**: Human-readable statistics in JSON format
-- **Database Integration**: PostgreSQL storage for historical analysis
-- **Auto-save**: Automatic statistics persistence on shutdown
-
-## Development
-
-### Adding New Protocols
-1. Create protocol header file (`protocol.h`)
-2. Implement parser function (`protocol.c`)
-3. Add protocol detection in appropriate layer
-4. Update includes and function calls
-
-### Code Style
-- Minimal, functional comments
-- Consistent naming conventions
-- Proper error handling and validation
-- Thread-safe implementations
-
+Fragmented IPv4/IPv6 packets are counted at the network layer and marked incomplete; there is no IP fragment reassembly. Supported links: Ethernet/VLAN (up to eight tags), NULL/LOOP, SLL, genuine SLL2, and raw IP. Unsupported links are explicitly counted, never guessed as Ethernet.
 
 ## Configuration
 
-### Statistics Configuration
-Statistics are automatically collected and can be configured via the `stats_init()` function:
-- **JSON file**: `stats.json` (auto-generated in build directory)
-- **PostgreSQL**: Configure connection string in `stats_init()`
-  - Format: `"host=localhost port=5432 dbname=snifferdb user=sniffer password=snifferpass"`
-- **Batch interval**: Configurable batch update frequency (default: periodic updates)
+Precedence: CLI, process environment, `.env`, defaults. `--no-env` disables loading the working directory's `.env`. CLI numeric arguments and environment numeric settings reject malformed/out-of-range values.
 
-### Docker Configuration
-The `docker-compose.yaml` includes:
-- **PostgreSQL**: Database for statistics storage (port 5432)
-  - User: `sniffer`
-  - Password: `snifferpass`
-  - Database: `snifferdb`
-- **Grafana**: Visualization dashboard (port 3000)
-  - Default credentials: `admin/admin`
-  - Pre-configured to connect to PostgreSQL
-  - Access at: `http://localhost:3000`
+| Setting | Default / meaning |
+|---|---|
+| `SNIFFER_IFACE`, `SNIFFER_FILTER` | Interface and pcap BPF |
+| `SNIFFER_READ`, `SNIFFER_WRITE` | Offline input/live recording; mutually exclusive |
+| `SNIFFER_STATE_DIR` | `.` for live; unique `.replay-*` for replay unless explicitly set |
+| `SNIFFER_SENSOR_ID` | `default`; must match an existing versioned state directory |
+| `SNIFFER_SNAPLEN` | 65536; accepted range 68–262144 |
+| `SNIFFER_TIMEOUT_MS` | 1000; accepted range 10–60000 |
+| `SNIFFER_PROMISC` | 1; 0 disables promiscuous mode |
+| `SNIFFER_QUEUE_BYTES` | 64 MiB; accepted range 256 KiB–1 GiB |
+| `STATS_FLUSH_MS` | 60000; accepted range 1000–3600000 |
+| `LOG_LEVEL` / `--log-level` | 0 error, 1 warning, 2 info, 3 packet detail |
+| `SNIFFER_SYN_THRESHOLD` | 20 distinct destination/port pairs per source in 60 seconds |
+| `SNIFFER_DHCP_THRESHOLD` | 32 distinct client transactions in 10 seconds |
+| `SNIFFER_RETENTION_DAYS` | 0 disables cleanup; positive values delete expired v2 rows for this sensor |
 
-### Database Setup
-1. **Using Docker Compose** (Recommended):
-   ```bash
-   docker-compose up -d postgres
-   ```
-   This automatically creates the database and required tables.
+Connection precedence: `AWS_RDS_CONNINFO`, `DATABASE_URL`, `POSTGRES_CONNINFO`, then libpq `PGHOST`/`PGPORT`/`PGDATABASE`/`PGUSER`/`PGPASSWORD`. Prefer PG variables for passwords containing spaces or quotes. `--no-db` overrides all connections. `--db-required` fails startup when PostgreSQL is unavailable; ordinary operation retains pending writes locally and reports degraded health.
 
-2. **Manual PostgreSQL Setup**:
-   ```sql
-   CREATE DATABASE snifferdb;
-   CREATE USER sniffer WITH PASSWORD 'snifferpass';
-   GRANT ALL PRIVILEGES ON DATABASE snifferdb TO sniffer;
-   ```
+## Statistics and recovery contract
 
-### Database Schema
-PostgreSQL table structure (auto-created by the application):
-```sql
-CREATE TABLE IF NOT EXISTS protocol_stats (
-    id SERIAL PRIMARY KEY,
-    protocol VARCHAR(32) UNIQUE NOT NULL,
-    packet_count BIGINT DEFAULT 0,
-    byte_count BIGINT DEFAULT 0,
-    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+JSON/API `schema_version=2`:
+
+- `total_packets`: packets delivered by pcap, counted once.
+- `total_bytes`: captured bytes; `wire_bytes`: pcap-reported original bytes.
+- Protocol counters overlap by layer. TCP counts packets; stream-level HTTP/DNS/TLS counts complete recognized observations/messages. These are not interchangeable traffic totals.
+- `analyzed`, queue/allocation drops, parser rejection observations, recording errors, detector/stream evictions, and alert saturation are reported separately.
+- JSON totals are cumulative for the state directory. Database inserts are immutable interval deltas, with sensor/session/event identity and measured interval duration.
+
+Only the persistence worker uses the PostgreSQL connection. JSON and pending journals are atomically replaced. Stable event IDs and primary keys make uncertain-commit retries idempotent. On restart, pending events are delivered before subsequent deltas; acknowledged totals are checkpointed before journals are removed.
+
+A state directory is exclusively locked. Corrupt/incompatible files or a changed sensor identity fail initialization instead of silently resetting totals. Legacy JSON is preserved as `stats.json.legacy` and corrected counters start at zero. Different subsequent legacy snapshots receive unique archive filenames. Historical layer double-counting cannot be reconstructed; exclude legacy totals from new measurement comparisons.
+
+Pending alert storage is bounded to 256 entries; overflow increments `alert_drops`. Journals preserve flushed events across database outages. Packets/counters and alerts not yet checkpointed can be lost on process termination or power failure. This is bounded-resource monitoring, not a lossless capture guarantee. Recording uses a separate 32 MiB queue; overflow or failed writes increments recording_errors. Filesystem stalls remain subject to operating-system I/O behavior.
+
+## Protocol and detection scope
+
+TCP analysis has 64 directional flows with 64 KiB data windows plus bounded presence/handshake buffers. It handles TCP segmentation, observed-SYN out-of-order delivery, retransmission deduplication, and TLS handshakes across records. Conflicting buffered overlaps retire the flow. Midstream capture cannot reconstruct data preceding the first observed segment. Flow state expires after 120 capture-time seconds.
+
+HTTP requires complete headers and Content-Length-delimited bodies (or explicitly bodyless responses). Chunked/close-delimited response bodies and HTTP/2 are unsupported and counted accordingly. DNS-over-TCP supports multiple framed messages. DNS authorities/additionals are not fully decoded. TLS analysis does not decrypt application data or ECH. DHCPv6 provides message/relay classification rather than full option decoding.
+
+Security rules are heuristics: distinct-target SYN bursts, long high-entropy DNS labels, recent ARP mapping conflicts scoped by network/VLAN, deduplicated DHCP transaction bursts, and unusually long SNI. Gratuitous ARP alone and large DNS messages alone do not imply attacks. Alert timestamps/windows use original capture time in UTC; replay speed does not change the event clock. Nonmonotonic timestamps reset applicable windows. Confidence remains heuristic; thresholds require calibration for the monitored network.
+
+## HTTP API
+
+Opt-in with `--api-port 8080 --api-token TOKEN`; default bind is `127.0.0.1`. Set `SNIFFER_API_CONTROL_TOKEN` to require a separate credential for filter updates. With a single token, that token grants both reading and control. For remote access, deploy an authenticated TLS proxy and keep the sniffer bound locally.
+
+- `GET /health`: capture lifecycle/backlog and persistence health; liveness is distinct from capture readiness.
+- `GET /stats`: cumulative schema-v2 snapshot.
+- `GET /alerts?offset=0&limit=32`: recent in-memory alerts, oldest first; limits 1–32, offsets 0–128. Database retains durable history.
+- `POST /filter` with `{"bpf":"tcp and (port 80 or port 443)"}`: capture-owned command, forbidden during replay.
+
+HTTP/1.1 only, connection-close responses, maximum request buffer 8192 bytes/body 4096 bytes, up to 16 concurrent clients, two-second request/response deadlines, and 60 requests per client address per ten seconds. Chunked requests are rejected. Authorization is parsed only from headers. Tokens and BPF strings must fit configured fixed buffers; JSON escaped non-ASCII BPF characters are unsupported.
+
+## Docker and Grafana
+
+Copy `.env.example` to `.env` and fill credentials. Default services are PostgreSQL/Grafana; capture mode is explicit:
+
+```sh
+docker compose up -d postgres grafana
+docker compose --profile replay run --build --rm replay
+docker compose --profile live up --build -d sniffer
+# Build/test the Linux container stage
+docker build --target tests .
 ```
 
-## Future Enhancements
+Bridge-mode live capture sees the sniffer container's namespace, not arbitrary host/LAN traffic. Native host capture is the portable option. On Linux, an explicitly configured host-network deployment can capture host interfaces, but its database endpoint must be reachable without Compose service DNS.
 
-- [x] HTTP/HTTPS protocol support
-- [x] DHCP protocol parsing (DISCOVER/OFFER/REQUEST/ACK, ports 67/68)
-- [x] Statistics collection system
-- [x] Database integration (incl. `db_migration_add_dhcp.sql`, AWS RDS docs)
-- [x] Docker containerization
-- [x] VLAN (802.1Q) support
-- [x] Packet filtering capabilities (`--filter` BPF)
-- [x] PCAP file export (`--write out.pcap`)
-- [ ] GUI interface
-- [ ] REST API for remote access
-- [ ] Real-time Grafana dashboards
-- [ ] Machine learning anomaly detection
+PostgreSQL and Grafana use loopback-published ports (5432, 3000). The datasource UID and environment substitution match the dashboard. Dashboard time range/sensor filters operate on v2 tables; protocol bytes are labeled overlapping. Password defaults are not supplied by Compose. Persistent volumes retain the database, Grafana, and live state.
 
-## License
+## Migration and operations
 
-This project is open source and available under the MIT License.
+`db_migration_add_dhcp.sql` is the canonical transactional v2 schema, embedded at build time. It creates `protocol_stats_v2`, `alerts_v2`, and `sniffer_schema` without modifying historical tables. It works beside timestamp-based and protocol-per-row legacy layouts. Apply it administratively for production, then grant the application the required insert/select privileges and provision a read-only Grafana role. The application validates a precreated v2 schema using reads and only runs migration DDL when that validation fails.
 
-## Contributing
+Database socket operations have two-second connection/query deadlines; system name resolution and filesystem operations remain subject to OS behavior. Local checkpoint failures cause nonzero shutdown status. Set a retention policy explicitly; defaults preserve history. Back up database/state before upgrades and use a new state directory if rolling back to the legacy executable.
 
-Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
+See tests/README.md for fault-injection, fuzzing, and benchmark commands. MIT project license: LICENSE. Vendored jsmn has its own license in src/vendor/JSMN-LICENSE.
+
+See [REMEDIATION.md](REMEDIATION.md) for the audit-to-change mapping, local verification record, rollout steps, and remaining verification limits.
+
+Replay rows use original capture timestamps. Select the capture's time range in Grafana to view historical fixtures.

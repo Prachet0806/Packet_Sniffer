@@ -15,7 +15,9 @@ static inline void mutex_unlock(mutex_t *m) { LeaveCriticalSection(m); }
 static inline void mutex_destroy(mutex_t *m) { DeleteCriticalSection(m); }
 static inline void cond_init(cond_t *c) { InitializeConditionVariable(c); }
 static inline void sleep_ms(unsigned ms) { Sleep(ms); }
-static inline int strncasecmp_compat(const char *s1, const char *s2, size_t n) { return _strnicmp(s1, s2, n); }
+static inline int strncasecmp_compat(const char *s1, const char *s2, size_t n) {
+    return _strnicmp(s1, s2, n);
+}
 #else
 #ifndef _DEFAULT_SOURCE
 #define _DEFAULT_SOURCE
@@ -26,6 +28,7 @@ static inline int strncasecmp_compat(const char *s1, const char *s2, size_t n) {
 #include <pthread.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 #include <strings.h>
 #include <string.h>
 typedef pthread_mutex_t mutex_t;
@@ -38,8 +41,9 @@ static inline void mutex_unlock(mutex_t *m) { pthread_mutex_unlock(m); }
 static inline void mutex_destroy(mutex_t *m) { pthread_mutex_destroy(m); }
 static inline void cond_init(cond_t *c) { pthread_cond_init(c, NULL); }
 static inline void sleep_ms(unsigned ms) {
-    struct timespec ts = { .tv_sec = 0, .tv_nsec = (long)ms * 1000000L };
-    nanosleep(&ts, NULL);
+    struct timespec ts = {.tv_sec = ms / 1000, .tv_nsec = (long)(ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
 }
 #define strncasecmp_compat strncasecmp
 #endif

@@ -3,16 +3,41 @@ on: [push, pull_request]
 jobs:
   linux:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: sniffer
+          POSTGRES_PASSWORD: test-only-password
+          POSTGRES_DB: sniffer_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U sniffer -d sniffer_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y cmake gcc libpcap-dev libpq-dev
+        run: sudo apt-get update && sudo apt-get install -y cmake gcc clang python3 libpcap-dev libpq-dev postgresql-client
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release
       - name: CTest
         run: ctest --test-dir build --output-on-failure
+      - name: Persistence and recovery
+        run: python3 tests/postgres_integration.py build/sniffer build/stats_stress /usr/bin/psql 'host=127.0.0.1 port=5432 dbname=sniffer_test user=sniffer password=test-only-password' .
+      - name: Sanitizers
+        run: |
+          cmake -S . -B build-asan -DCMAKE_C_COMPILER=clang -DSNIFFER_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-asan --parallel 2
+          ctest --test-dir build-asan --output-on-failure
+      - name: Parser fuzz smoke
+        run: |
+          cmake -S . -B build-fuzz -DCMAKE_C_COMPILER=clang -DBUILD_TESTING=OFF -DSNIFFER_FUZZ=ON
+          cmake --build build-fuzz --parallel 2
+          SNIFFER_STATE_DIR=build-fuzz/state ./build-fuzz/fuzz_parsers -max_total_time=20 -max_len=4096
+      - name: Container test stage
+        run: docker build --target tests .
   windows:
     runs-on: windows-2022
     steps:

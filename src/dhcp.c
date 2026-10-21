@@ -17,155 +17,167 @@
 #define DHCP_MAGIC_COOKIE 0x63825363
 
 // Common DHCP option codes
-#define DHCP_OPT_PAD              0
-#define DHCP_OPT_SUBNET_MASK      1
-#define DHCP_OPT_ROUTER           3
-#define DHCP_OPT_DNS_SERVER       6
-#define DHCP_OPT_HOSTNAME         12
-#define DHCP_OPT_REQUESTED_IP     50
-#define DHCP_OPT_LEASE_TIME       51
-#define DHCP_OPT_MESSAGE_TYPE     53
-#define DHCP_OPT_SERVER_ID        54
-#define DHCP_OPT_PARAM_REQ_LIST   55
-#define DHCP_OPT_RENEWAL_TIME     58
-#define DHCP_OPT_REBINDING_TIME   59
-#define DHCP_OPT_CLIENT_ID        61
-#define DHCP_OPT_END              255
+#define DHCP_OPT_PAD 0
+#define DHCP_OPT_SUBNET_MASK 1
+#define DHCP_OPT_ROUTER 3
+#define DHCP_OPT_DNS_SERVER 6
+#define DHCP_OPT_HOSTNAME 12
+#define DHCP_OPT_REQUESTED_IP 50
+#define DHCP_OPT_LEASE_TIME 51
+#define DHCP_OPT_MESSAGE_TYPE 53
+#define DHCP_OPT_SERVER_ID 54
+#define DHCP_OPT_PARAM_REQ_LIST 55
+#define DHCP_OPT_RENEWAL_TIME 58
+#define DHCP_OPT_REBINDING_TIME 59
+#define DHCP_OPT_CLIENT_ID 61
+#define DHCP_OPT_END 255
 
 // Get DHCP message type name
-static const char* get_dhcp_message_type(uint8_t type) {
+static const char *get_dhcp_message_type(uint8_t type) {
     switch (type) {
-        case DHCP_DISCOVER: return "DISCOVER";
-        case DHCP_OFFER:    return "OFFER";
-        case DHCP_REQUEST:  return "REQUEST";
-        case DHCP_DECLINE:  return "DECLINE";
-        case DHCP_ACK:      return "ACK";
-        case DHCP_NAK:      return "NAK";
-        case DHCP_RELEASE:  return "RELEASE";
-        case DHCP_INFORM:   return "INFORM";
-        default:            return "UNKNOWN";
+    case DHCP_DISCOVER:
+        return "DISCOVER";
+    case DHCP_OFFER:
+        return "OFFER";
+    case DHCP_REQUEST:
+        return "REQUEST";
+    case DHCP_DECLINE:
+        return "DECLINE";
+    case DHCP_ACK:
+        return "ACK";
+    case DHCP_NAK:
+        return "NAK";
+    case DHCP_RELEASE:
+        return "RELEASE";
+    case DHCP_INFORM:
+        return "INFORM";
+    default:
+        return "UNKNOWN";
     }
 }
 
 // Get operation type name
-static const char* get_dhcp_op_name(uint8_t op) {
+static const char *get_dhcp_op_name(uint8_t op) {
     switch (op) {
-        case 1: return "BOOTREQUEST";
-        case 2: return "BOOTREPLY";
-        default: return "UNKNOWN";
+    case 1:
+        return "BOOTREQUEST";
+    case 2:
+        return "BOOTREPLY";
+    default:
+        return "UNKNOWN";
     }
 }
 
 // Parse DHCP options
-static void parse_dhcp_options(const u_char *options, int options_len, 
-                               uint8_t *msg_type, char *hostname, int hostname_size,
-                               uint32_t *requested_ip, uint32_t *server_id) {
+static void parse_dhcp_options(const u_char *options, int options_len, uint8_t *msg_type,
+                               char *hostname, int hostname_size, uint32_t *requested_ip,
+                               uint32_t *server_id) {
     int offset = 0;
-    
+
     *msg_type = 0;
     hostname[0] = '\0';
     *requested_ip = 0;
     *server_id = 0;
-    
+
     while (offset < options_len) {
         uint8_t code = options[offset];
-        
+
         // End option
         if (code == DHCP_OPT_END) {
             break;
         }
-        
+
         // Pad option (no length)
         if (code == DHCP_OPT_PAD) {
             offset++;
             continue;
         }
-        
+
         // Check if we have enough space for length byte
         if (offset + 1 >= options_len) {
             LOG_WARN_SIMPLE("DHCP: Truncated option at offset %d\n", offset);
             break;
         }
-        
+
         uint8_t len = options[offset + 1];
-        
+
         // Validate option length
         if (offset + 2 + len > options_len) {
             LOG_WARN_SIMPLE("DHCP: Invalid option length %d at offset %d\n", len, offset);
             break;
         }
-        
+
         const u_char *opt_data = &options[offset + 2];
-        
+
         switch (code) {
-            case DHCP_OPT_MESSAGE_TYPE:
-                if (len == 1) {
-                    *msg_type = opt_data[0];
-                }
-                break;
-                
-            case DHCP_OPT_HOSTNAME:
-                if (len > 0 && len < hostname_size) {
-                    memcpy(hostname, opt_data, len);
-                    hostname[len] = '\0';
-                }
-                break;
-                
-            case DHCP_OPT_REQUESTED_IP:
-                if (len == 4) {
-                    memcpy(requested_ip, opt_data, 4);
-                }
-                break;
-                
-            case DHCP_OPT_SERVER_ID:
-                if (len == 4) {
-                    memcpy(server_id, opt_data, 4);
-                }
-                break;
-                
-            case DHCP_OPT_LEASE_TIME:
-                if (len == 4) {
-                    uint32_t lease_time;
-                    memcpy(&lease_time, opt_data, 4);
-                    lease_time = ntohl(lease_time);
-                    LOG_DEBUG_SIMPLE("  Lease Time: %u seconds\n", lease_time);
-                }
-                break;
-                
-            case DHCP_OPT_SUBNET_MASK:
-                if (len == 4) {
-                    char mask[INET_ADDRSTRLEN] = "?";
-                    struct in_addr addr;
-                    memcpy(&addr.s_addr, opt_data, 4);
-                    if (!inet_ntop(AF_INET, &addr, mask, sizeof(mask)))
-                        snprintf(mask, sizeof(mask), "?");
-                    LOG_DEBUG_SIMPLE("  Subnet Mask: %s\n", mask);
-                }
-                break;
+        case DHCP_OPT_MESSAGE_TYPE:
+            if (len == 1) {
+                *msg_type = opt_data[0];
+            }
+            break;
 
-            case DHCP_OPT_ROUTER:
-                if (len >= 4) {
-                    char router[INET_ADDRSTRLEN] = "?";
-                    struct in_addr addr;
-                    memcpy(&addr.s_addr, opt_data, 4);
-                    if (!inet_ntop(AF_INET, &addr, router, sizeof(router)))
-                        snprintf(router, sizeof(router), "?");
-                    LOG_DEBUG_SIMPLE("  Router: %s\n", router);
-                }
-                break;
+        case DHCP_OPT_HOSTNAME:
+            if (len > 0 && len < hostname_size) {
+                memcpy(hostname, opt_data, len);
+                hostname[len] = '\0';
+            }
+            break;
 
-            case DHCP_OPT_DNS_SERVER:
-                if (len >= 4) {
-                    char dns[INET_ADDRSTRLEN] = "?";
-                    struct in_addr addr;
-                    memcpy(&addr.s_addr, opt_data, 4);
-                    if (!inet_ntop(AF_INET, &addr, dns, sizeof(dns)))
-                        snprintf(dns, sizeof(dns), "?");
-                    LOG_DEBUG_SIMPLE("  DNS Server: %s\n", dns);
-                }
-                break;
+        case DHCP_OPT_REQUESTED_IP:
+            if (len == 4) {
+                memcpy(requested_ip, opt_data, 4);
+            }
+            break;
+
+        case DHCP_OPT_SERVER_ID:
+            if (len == 4) {
+                memcpy(server_id, opt_data, 4);
+            }
+            break;
+
+        case DHCP_OPT_LEASE_TIME:
+            if (len == 4) {
+                uint32_t lease_time;
+                memcpy(&lease_time, opt_data, 4);
+                lease_time = ntohl(lease_time);
+                LOG_DEBUG_SIMPLE("  Lease Time: %u seconds\n", lease_time);
+            }
+            break;
+
+        case DHCP_OPT_SUBNET_MASK:
+            if (len == 4) {
+                char mask[INET_ADDRSTRLEN] = "?";
+                struct in_addr addr;
+                memcpy(&addr.s_addr, opt_data, 4);
+                if (!inet_ntop(AF_INET, &addr, mask, sizeof(mask)))
+                    snprintf(mask, sizeof(mask), "?");
+                LOG_DEBUG_SIMPLE("  Subnet Mask: %s\n", mask);
+            }
+            break;
+
+        case DHCP_OPT_ROUTER:
+            if (len >= 4) {
+                char router[INET_ADDRSTRLEN] = "?";
+                struct in_addr addr;
+                memcpy(&addr.s_addr, opt_data, 4);
+                if (!inet_ntop(AF_INET, &addr, router, sizeof(router)))
+                    snprintf(router, sizeof(router), "?");
+                LOG_DEBUG_SIMPLE("  Router: %s\n", router);
+            }
+            break;
+
+        case DHCP_OPT_DNS_SERVER:
+            if (len >= 4) {
+                char dns[INET_ADDRSTRLEN] = "?";
+                struct in_addr addr;
+                memcpy(&addr.s_addr, opt_data, 4);
+                if (!inet_ntop(AF_INET, &addr, dns, sizeof(dns)))
+                    snprintf(dns, sizeof(dns), "?");
+                LOG_DEBUG_SIMPLE("  DNS Server: %s\n", dns);
+            }
+            break;
         }
-        
+
         offset += 2 + len;
     }
 }
@@ -174,11 +186,11 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
                 unsigned short src_port, unsigned short dst_port) {
     // Validate minimum size
     if (size < (int)sizeof(dhcp_header_t)) {
-        LOG_WARN_SIMPLE("DHCP: Truncated header (size: %d, need: %zu)\n", 
-                       size, sizeof(dhcp_header_t));
+        LOG_WARN_SIMPLE("DHCP: Truncated header (size: %d, need: %zu)\n", size,
+                        sizeof(dhcp_header_t));
         return;
     }
-    
+
     const dhcp_header_t *dhcp_ptr = (const dhcp_header_t *)data;
     dhcp_header_t dhcp;
     memcpy(&dhcp, dhcp_ptr, sizeof(dhcp));
@@ -186,8 +198,8 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
     // Verify magic cookie
     uint32_t magic = ntohl(dhcp.magic);
     if (magic != DHCP_MAGIC_COOKIE) {
-        LOG_DEBUG_SIMPLE("DHCP: Invalid magic cookie 0x%08X (expected 0x%08X)\n",
-                        magic, DHCP_MAGIC_COOKIE);
+        LOG_DEBUG_SIMPLE("DHCP: Invalid magic cookie 0x%08X (expected 0x%08X)\n", magic,
+                         DHCP_MAGIC_COOKIE);
         return;
     }
 
@@ -220,49 +232,50 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
 
     if (dhcp.ciaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.ciaddr, 4);
-        if (!inet_ntop(AF_INET, &addr, ciaddr, sizeof(ciaddr))) ciaddr[0] = '\0';
+        if (!inet_ntop(AF_INET, &addr, ciaddr, sizeof(ciaddr)))
+            ciaddr[0] = '\0';
     }
 
     if (dhcp.yiaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.yiaddr, 4);
-        if (!inet_ntop(AF_INET, &addr, yiaddr, sizeof(yiaddr))) yiaddr[0] = '\0';
+        if (!inet_ntop(AF_INET, &addr, yiaddr, sizeof(yiaddr)))
+            yiaddr[0] = '\0';
     }
 
     if (dhcp.siaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.siaddr, 4);
-        if (!inet_ntop(AF_INET, &addr, siaddr, sizeof(siaddr))) siaddr[0] = '\0';
+        if (!inet_ntop(AF_INET, &addr, siaddr, sizeof(siaddr)))
+            siaddr[0] = '\0';
     }
 
     if (dhcp.giaddr != 0) {
         memcpy(&addr.s_addr, &dhcp.giaddr, 4);
-        if (!inet_ntop(AF_INET, &addr, giaddr, sizeof(giaddr))) giaddr[0] = '\0';
+        if (!inet_ntop(AF_INET, &addr, giaddr, sizeof(giaddr)))
+            giaddr[0] = '\0';
     }
-    
+
     // Parse options
     const u_char *options = data + sizeof(dhcp_header_t);
     int options_len = size - sizeof(dhcp_header_t);
-    
+
     uint8_t msg_type = 0;
     char hostname[256] = {0};
     uint32_t requested_ip = 0;
     uint32_t server_id = 0;
-    
+
     if (options_len > 0) {
         parse_dhcp_options(options, options_len, &msg_type, hostname, sizeof(hostname),
-                          &requested_ip, &server_id);
+                           &requested_ip, &server_id);
     }
-    
+
     // Print DHCP message info
-    LOG_INFO_SIMPLE("DHCP: %s:%u -> %s:%u, Op=%s, Type=%s, XID=0x%08X\n",
-           src_ip, src_port, dst_ip, dst_port,
-           get_dhcp_op_name(dhcp.op),
-           msg_type ? get_dhcp_message_type(msg_type) : "UNKNOWN",
-           xid);
+    LOG_INFO_SIMPLE("DHCP: %s:%u -> %s:%u, Op=%s, Type=%s, XID=0x%08X\n", src_ip, src_port, dst_ip,
+                    dst_port, get_dhcp_op_name(dhcp.op),
+                    msg_type ? get_dhcp_message_type(msg_type) : "UNKNOWN", xid);
     security_dhcp(msg_type, dhcp.chaddr, xid, secs, flags);
 
     // Print additional details in DEBUG mode
-    LOG_DEBUG_SIMPLE("  Hardware: Type=%u, Len=%u, Hops=%u\n",
-           dhcp.htype, dhcp.hlen, dhcp.hops);
+    LOG_DEBUG_SIMPLE("  Hardware: Type=%u, Len=%u, Hops=%u\n", dhcp.htype, dhcp.hlen, dhcp.hops);
 
     LOG_DEBUG_SIMPLE("  Flags: 0x%04X %s\n", flags, broadcast ? "(Broadcast)" : "");
     LOG_DEBUG_SIMPLE("  Elapsed: %u seconds\n", secs);
@@ -275,13 +288,17 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
         }
         LOG_DEBUG_SIMPLE("\n");
     }
-    
+
     // Print IP addresses if present
-    if (ciaddr[0]) LOG_DEBUG_SIMPLE("  Client IP: %s\n", ciaddr);
-    if (yiaddr[0]) LOG_DEBUG_SIMPLE("  Your IP: %s\n", yiaddr);
-    if (siaddr[0]) LOG_DEBUG_SIMPLE("  Server IP: %s\n", siaddr);
-    if (giaddr[0]) LOG_DEBUG_SIMPLE("  Gateway IP: %s\n", giaddr);
-    
+    if (ciaddr[0])
+        LOG_DEBUG_SIMPLE("  Client IP: %s\n", ciaddr);
+    if (yiaddr[0])
+        LOG_DEBUG_SIMPLE("  Your IP: %s\n", yiaddr);
+    if (siaddr[0])
+        LOG_DEBUG_SIMPLE("  Server IP: %s\n", siaddr);
+    if (giaddr[0])
+        LOG_DEBUG_SIMPLE("  Gateway IP: %s\n", giaddr);
+
     // Print hostname if present (sanitized: packet bytes may contain escapes)
     if (hostname[0]) {
         sanitize_printable(hostname, sizeof(hostname));
@@ -307,20 +324,34 @@ void parse_dhcp(const u_char *data, int size, const char *src_ip, const char *ds
 
 static const char *dhcpv6_msg_name(uint8_t t) {
     switch (t) {
-        case 1: return "SOLICIT";
-        case 2: return "ADVERTISE";
-        case 3: return "REQUEST";
-        case 4: return "CONFIRM";
-        case 5: return "RENEW";
-        case 6: return "REBIND";
-        case 7: return "REPLY";
-        case 8: return "RELEASE";
-        case 9: return "DECLINE";
-        case 10: return "RECONFIGURE";
-        case 11: return "INFORMATION-REQUEST";
-        case 12: return "RELAY-FORW";
-        case 13: return "RELAY-REPL";
-        default: return "UNKNOWN";
+    case 1:
+        return "SOLICIT";
+    case 2:
+        return "ADVERTISE";
+    case 3:
+        return "REQUEST";
+    case 4:
+        return "CONFIRM";
+    case 5:
+        return "RENEW";
+    case 6:
+        return "REBIND";
+    case 7:
+        return "REPLY";
+    case 8:
+        return "RELEASE";
+    case 9:
+        return "DECLINE";
+    case 10:
+        return "RECONFIGURE";
+    case 11:
+        return "INFORMATION-REQUEST";
+    case 12:
+        return "RELAY-FORW";
+    case 13:
+        return "RELAY-REPL";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -330,10 +361,17 @@ void parse_dhcpv6(const u_char *data, int size, const char *src_ip, const char *
         LOG_WARN_SIMPLE("DHCPv6: Truncated (%d bytes)\n", size);
         return;
     }
+    if (data[0] < 1 || data[0] > 13 || ((data[0] == 12 || data[0] == 13) && size < 34)) {
+        stats_note("malformed");
+        return;
+    }
     stats_increment("DHCP", (uint32_t)size);
+    if (data[0] == 12 || data[0] == 13) {
+        LOG_INFO_SIMPLE("DHCPv6: relay hop=%u\n", data[1]);
+        return;
+    }
     uint8_t msg = data[0];
     unsigned xid = ((unsigned)data[1] << 16) | ((unsigned)data[2] << 8) | data[3];
-    LOG_INFO_SIMPLE("DHCPv6: %s:%u -> %s:%u, Type=%s, XID=0x%06X (%d bytes opts)\n",
-           src_ip, src_port, dst_ip, dst_port,
-           dhcpv6_msg_name(msg), xid, size - 4);
+    LOG_INFO_SIMPLE("DHCPv6: %s:%u -> %s:%u, Type=%s, XID=0x%06X (%d bytes opts)\n", src_ip,
+                    src_port, dst_ip, dst_port, dhcpv6_msg_name(msg), xid, size - 4);
 }
