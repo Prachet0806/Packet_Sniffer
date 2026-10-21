@@ -18,6 +18,8 @@ python tests/postgres_integration.py build/sniffer build/stats_stress /usr/bin/p
 
 Windows binaries are under build/Release. This verifies legacy schema preservation, restricted database privileges, rejection of incomplete schemas and damaged journals, concurrent counter updates during delayed inserts, cumulative watermarks, alert durability, repeated sessions, database outage journals, and recovery. Do not target a production database.
 
+Pass the executable path `/usr/bin/psql` directly on Debian/Ubuntu. It is a launcher symlink whose behavior depends on the name used to invoke it; the integration runner preserves that path.
+
 Clang sanitizer build: use `-DSNIFFER_SANITIZERS=ON`. Fuzzing build:
 
 ```sh
